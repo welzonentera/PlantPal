@@ -106,7 +106,7 @@ export default function AdminLogin() {
           <div className="flex items-center bg-[#e1e9d7] rounded-[50px] px-3.5 py-2 w-full mb-4">
             <input
               type="email"
-              placeholder="Email"
+              placeholder="Username or Email"
               className="flex-1 bg-transparent outline-none text-gray-800 placeholder-gray-500 text-base pl-4"
               value={email}
               onChange={(e) => setEmail(e.target.value)}

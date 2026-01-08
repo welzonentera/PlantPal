@@ -112,9 +112,8 @@ def signup(request):
                             status=status.HTTP_400_BAD_REQUEST)
 
         hashed_password = hash_password_sha256(password)
-
-        # generate a unique username
         username = generate_username()
+        
         while True:
             existing_username = (
                 supabase.table("users")
@@ -136,11 +135,26 @@ def signup(request):
             .execute()
         )
 
-        # create empty profile linked to the user
+        user_id = user.data[0]["id"]
+
+        # ✅ FIXED: Create profile WITHOUT user_name
         supabase.table("profiles").insert({
-            "user_id": user.data[0]["id"],
-            "user_name": username
+            "user_id": user_id
         }).execute()
+
+        # ✅ CREATE LOG & NOTIFICATION
+        create_system_log(
+            "INFO",
+            f"New user registered: {username} ({email})",
+            user_id=user_id
+        )
+        
+        create_notification(
+            "user_registered",
+            "New User Account Created",
+            f"New user {username} has registered with email {email}",
+            user_id=user_id
+        )
 
         return Response(
             {
@@ -151,6 +165,8 @@ def signup(request):
         )
 
     except Exception as e:
+        # ✅ LOG ERRORS
+        create_system_log("ERROR", f"Signup failed: {str(e)}")
         print(traceback.format_exc())
         return Response({"error": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
@@ -1339,7 +1355,41 @@ def get_users(request):
 @permission_classes([AllowAny])  # replace with custom admin check later
 def delete_user(request, user_id):
     try:
-        # Delete user from Supabase
+        # Define the order of deletion (child tables first, then parent)
+        # Based on your table list and likely foreign key relationships
+        related_tables = [
+            "admin_notifications",    # UNRESTRICTED
+            "search_history",         # UNRESTRICTED
+            "system_logs",            # UNRESTRICTED
+            "scan_history",           # Likely references users
+            "journal",                # Likely references users
+            "user_acceptance",        # Likely references users
+            "profiles",               # References users
+            "subscription_payment_information",  # Likely references users
+            # Note: plant_aliments, plant_images, plants might reference users
+            # if users can own plants, add them too
+        ]
+        
+        # First, delete from all related tables
+        for table in related_tables:
+            try:
+                # Try to delete where user_id matches
+                supabase.table(table).delete().eq("user_id", user_id).execute()
+                print(f"✓ Deleted from {table}")
+            except Exception as table_error:
+                # Some tables might use different column names
+                # Try common variations
+                try:
+                    supabase.table(table).delete().eq("user", user_id).execute()
+                except:
+                    try:
+                        supabase.table(table).delete().eq("user_id", user_id).execute()
+                    except:
+                        # Table might not have user reference or uses different column
+                        print(f"⚠ Could not delete from {table}: {table_error}")
+                        continue
+        
+        # Now delete the user
         response = supabase.table("users").delete().eq("id", user_id).execute()
 
         # Supabase response handling
@@ -2043,3 +2093,194 @@ def get_plant_by_id(request, plant_id):
     except Exception as e:
         print("❌ Error fetching plant:", traceback.format_exc())
         return Response({"error": str(e)}, status=500)
+
+
+@api_view(["GET"])
+@permission_classes([AllowAny])  # Change to admin-only in production
+def get_system_logs(request):
+    """
+    Fetch recent system logs for admin dashboard
+    """
+    try:
+        limit = request.GET.get("limit", 50)
+        log_level = request.GET.get("level")  # Optional filter: INFO, ERROR, WARNING
+        
+        query = supabase.table("system_logs").select("*").order("created_at", desc=True).limit(int(limit))
+        
+        if log_level:
+            query = query.eq("log_level", log_level.upper())
+        
+        response = query.execute()
+        logs = response.data or []
+        
+        # Format logs for display
+        formatted_logs = []
+        for log in logs:
+            formatted_logs.append({
+                "id": log["id"],
+                "level": log["log_level"],
+                "message": log["message"],
+                "user_id": log.get("user_id"),
+                "details": log.get("details"),
+                "timestamp": log["created_at"]
+            })
+        
+        return Response({"logs": formatted_logs}, status=200)
+    
+    except Exception as e:
+        print(f"❌ Error fetching system logs: {e}")
+        traceback.print_exc()
+        return Response({"error": str(e)}, status=500)
+
+
+@api_view(["GET"])
+@permission_classes([AllowAny])  # Change to admin-only in production
+def get_notifications(request):
+    """
+    Fetch recent notifications for admin dashboard
+    """
+    try:
+        limit = int(request.GET.get("limit", 20))
+        unread_only = request.GET.get("unread_only", "false").lower() == "true"
+
+        query = (
+            supabase
+            .table("admin_notifications")
+            .select("*")
+            .order("created_at", desc=True)
+            .limit(limit)
+        )
+
+        if unread_only:
+            query = query.eq("is_read", False)
+
+        response = query.execute()
+        rows = response.data or []
+
+        # ✅ NORMALIZE RESPONSE FOR FRONTEND
+        notifications = []
+        for n in rows:
+            notifications.append({
+                "id": str(n["id"]),
+                "type": n.get("type"),
+                "title": n.get("title"),
+                "message": n.get("message"),
+                "user_id": n.get("user_id"),
+                "is_read": n.get("is_read", False),
+                "created_at": n.get("created_at")
+            })
+
+        unread_response = (
+            supabase
+            .table("admin_notifications")
+            .select("id", count="exact")
+            .eq("is_read", False)
+            .execute()
+        )
+
+        return Response({
+            "notifications": notifications,
+            "unread_count": unread_response.count or 0
+        }, status=200)
+
+    except Exception as e:
+        print(f"❌ Error fetching notifications: {e}")
+        traceback.print_exc()
+        return Response({"error": str(e)}, status=500)
+
+
+@api_view(["PATCH"])
+@permission_classes([AllowAny])
+def mark_notification_read(request, notification_id):
+    """
+    Mark a notification as read
+    """
+    try:
+        response = (
+            supabase
+            .table("admin_notifications")
+            .update({"is_read": True})
+            .eq("id", str(notification_id))  # 👈 force string match
+            .select("*")                     # 👈 RETURN UPDATED ROW
+            .execute()
+        )
+
+        if not response.data:
+            return Response({"error": "Notification not found"}, status=404)
+
+        return Response({
+            "message": "Notification marked as read",
+            "notification": response.data[0]
+        }, status=200)
+
+    except Exception as e:
+        print(f"❌ Error marking notification as read: {e}")
+        return Response({"error": str(e)}, status=500)
+
+@api_view(["POST"])
+@permission_classes([AllowAny])
+def mark_all_notifications_read(request):
+    """
+    Mark all notifications as read
+    """
+    try:
+        response = (
+            supabase
+            .table("admin_notifications")
+            .update({"is_read": True})
+            .eq("is_read", False)
+            .select("id")
+            .execute()
+        )
+
+        return Response({
+            "message": "All notifications marked as read",
+            "updated_count": len(response.data or [])
+        }, status=200)
+
+    except Exception as e:
+        print(f"❌ Error marking all notifications as read: {e}")
+        return Response({"error": str(e)}, status=500)
+
+
+# ============================================================================
+# ✅ HELPER FUNCTIONS TO CREATE LOGS & NOTIFICATIONS
+# ============================================================================
+
+def create_system_log(level, message, user_id=None, details=None):
+    """
+    Helper function to create system logs
+    level: INFO, WARNING, ERROR, SUCCESS
+    """
+    try:
+        log_data = {
+            "log_level": level.upper(),
+            "message": message,
+            "user_id": str(user_id) if user_id else None,
+            "details": details
+        }
+        supabase.table("system_logs").insert(log_data).execute()
+        print(f"📝 Log created: [{level}] {message}")
+    except Exception as e:
+        print(f"❌ Failed to create log: {e}")
+
+
+def create_notification(notification_type, title, message, user_id=None, related_id=None):
+    """
+    Helper function to create admin notifications
+    """
+    try:
+        notification_data = {
+            "type": notification_type,
+            "title": title,
+            "message": message,
+            "user_id": str(user_id) if user_id else None,
+            "related_id": str(related_id) if related_id else None,
+            "is_read": False
+        }
+        supabase.table("admin_notifications").insert(notification_data).execute()
+        print(f"🔔 Notification created: {title}")
+    except Exception as e:
+        print(f"❌ Failed to create notification: {e}")
+
+

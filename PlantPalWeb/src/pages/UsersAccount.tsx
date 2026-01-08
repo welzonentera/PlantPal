@@ -352,7 +352,8 @@ export default function UserAccount() {
               </thead>
               <tbody className="divide-y divide-gray-100">
                 {filteredUsers.map((user) => (
-                  <tr key={user.id} className="hover:bg-gray-50">
+                  <tr key={user.id} 
+                    className={"bg-[white] hover:bg-[#bcebb5]"}>
                     <td className="px-6 py-4">
                       <div className="flex items-center gap-3">
                         <img

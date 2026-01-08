@@ -160,7 +160,7 @@ export default function Login() {
         <View style={styles.inputContainer}>
           <TextInput
             style={styles.input}
-            placeholder="Email"
+            placeholder="Username or Email"
             placeholderTextColor="#999"
             value={email}
             onChangeText={setEmail}

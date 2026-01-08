@@ -168,7 +168,7 @@ export default function SignUp() {
         <View style={styles.inputContainer}>
           <TextInput
             style={styles.input}
-            placeholder="Email"
+            placeholder="Username or Email"
             placeholderTextColor="#5c7255ff"
             value={email}
             onChangeText={setEmail}

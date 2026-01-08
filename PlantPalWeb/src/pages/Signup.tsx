@@ -140,7 +140,7 @@ export default function SignUp() {
           <div className="flex items-center bg-[#e1e9d7] rounded-full px-4 py-3 w-full mb-4">
             <input
               type="email"
-              placeholder="Email"
+              placeholder="Username"
               className="flex-1 bg-transparent outline-none text-gray-800 placeholder-gray-500 text-base pl-2"
               value={email}
               onChange={(e) => setEmail(e.target.value)}

@@ -50,7 +50,16 @@ urlpatterns = [
    
 
 
+# System Logs & Notifications
+    path('api/admin/logs/', views.get_system_logs, name='get_system_logs'),
+    path('api/admin/notifications/', views.get_notifications, name='get_notifications'),
+    path('api/admin/notifications/<uuid:notification_id>/read/', views.mark_notification_read, name='mark_notification_read'),
+    path('api/admin/notifications/read-all/', views.mark_all_notifications_read, name='mark_all_notifications_read'),
 
 
+    
 
 ]
+
+
+
