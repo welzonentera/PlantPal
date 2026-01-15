@@ -1,4 +1,6 @@
-# Logs
+############################
+# LOGS
+############################
 logs
 *.log
 npm-debug.log*
@@ -7,18 +9,102 @@ yarn-error.log*
 pnpm-debug.log*
 lerna-debug.log*
 
-node_modules
-dist
-dist-ssr
+############################
+# NODE / FRONTEND
+############################
+node_modules/
+dist/
+dist-ssr/
 *.local
+.vite/
 
-# Editor directories and files
+############################
+# REACT / VITE / TS
+############################
+*.tsbuildinfo
+coverage/
+.eslintcache
+
+############################
+# PYTHON
+############################
+__pycache__/
+*.py[cod]
+*$py.class
+.env
+.venv
+venv/
+ENV/
+env/
+
+############################
+# DJANGO
+############################
+*.sqlite3
+media/
+staticfiles/
+db.sqlite3
+
+############################
+# MACHINE LEARNING / MODELS
+############################
+*.pth
+*.pt
+*.h5
+*.onnx
+*.joblib
+
+Plantpal_model/
+PlantPal_model/
+debug_scans/
+final_model.pth
+training_history.json
+model_info.json
+
+############################
+# DATASETS
+############################
+data/
+datasets/
+images/
+*.zip
+*.tar.gz
+
+############################
+# CACHE / TEMP FILES
+############################
+.cache/
+.tmp/
+temp/
+tmp/
+
+############################
+# EDITORS & OS FILES
+############################
 .vscode/*
 !.vscode/extensions.json
-.idea
+.idea/
 .DS_Store
+Thumbs.db
 *.suo
 *.ntvs*
 *.njsproj
 *.sln
 *.sw?
+
+############################
+# BUILD / DEPLOY
+############################
+build/
+out/
+.next/
+.vercel/
+.netlify/
+
+############################
+# SECRETS
+############################
+*.key
+*.pem
+*.crt
+*.secret
