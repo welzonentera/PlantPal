@@ -13,7 +13,4 @@ urlpatterns = [
     path("api/token/", TokenObtainPairView.as_view(), name="token_obtain_pair"),
     path("api/token/refresh/", TokenRefreshView.as_view(), name="token_refresh"),
 
-    # ❌ These two are redundant if you already defined them in api/urls.py
-    # path("profile/", views.profile, name="profile"),
-    # path("search-address/", views.search_address, name="search_address"),
 ]

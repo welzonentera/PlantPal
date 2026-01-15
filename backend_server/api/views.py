@@ -1142,6 +1142,7 @@ def delete_plant(request, plant_id):
 def add_terms_conditions(request):
     """
     Admin: Add a new Terms and Conditions version
+    Also notifies all premium users
     """
     try:
         data = request.data
@@ -1168,6 +1169,9 @@ def add_terms_conditions(request):
             .execute()
         )
 
+        # ✨ NEW: Notify all premium users
+        notify_premium_users_of_terms_update(version, effective_date)
+
         return Response({
             "message": "New terms and conditions version added successfully!",
             "terms": new_terms.data[0]
@@ -1177,7 +1181,6 @@ def add_terms_conditions(request):
         print(traceback.format_exc())
         return Response({"error": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
-#for the user terms and conditions   
 @api_view(['POST'])
 def accept_terms_conditions(request):
     """
@@ -1185,44 +1188,47 @@ def accept_terms_conditions(request):
     """
     try:
         data = request.data
-        user_id = data.get("user_id")
+        user_email = data.get("user_email")
         terms_id = data.get("terms_id")
 
-        if not user_id or not terms_id:
-            return Response({"error": "user_id and terms_id are required"},
-                            status=status.HTTP_400_BAD_REQUEST)
+        if not user_email or not terms_id:
+            return Response(
+                {"error": "user_email and terms_id are required"},
+                status=status.HTTP_400_BAD_REQUEST
+            )
 
-        # Check if already accepted
-        existing = (
-            supabase.table("user_acceptance")
-            .select("*")
-            .eq("user_id", user_id)
-            .eq("terms_id", terms_id)
-            .execute()
-        )
-        if existing.data:
-            return Response({"message": "User already accepted this version."},
-                            status=status.HTTP_200_OK)
-
-        # Insert new acceptance record
+        # Upsert: insert if not exists, otherwise do nothing
         acceptance = (
             supabase.table("user_acceptance")
-            .insert({
-                "user_id": user_id,
-                "terms_id": terms_id
-            })
+            .upsert(
+                {
+                    "user_email": user_email,
+                    "terms_id": terms_id
+                },
+                on_conflict=["user_email", "terms_id"]  # unique constraint
+            )
             .execute()
         )
 
-        return Response({
-            "message": "Terms and Conditions accepted successfully!",
-            "acceptance": acceptance.data[0]
-        }, status=status.HTTP_201_CREATED)
+        if acceptance.data and len(acceptance.data) > 0:
+            # New acceptance inserted
+            return Response(
+                {
+                    "message": "Terms and Conditions accepted successfully!",
+                    "acceptance": acceptance.data[0]
+                },
+                status=status.HTTP_201_CREATED
+            )
+        else:
+            # Already accepted (upsert ignored insert)
+            return Response(
+                {"message": "User already accepted this version."},
+                status=status.HTTP_200_OK
+            )
 
     except Exception as e:
         print(traceback.format_exc())
         return Response({"error": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
-    
 
 # ✅ Get all Terms & Conditions versions (for admin dashboard)
 @api_view(['GET'])
@@ -1430,7 +1436,6 @@ def get_latest_terms_conditions(request):
     
 
 @api_view(['GET'])
-@permission_classes([IsAuthenticated])
 def get_all_plants(request):
     """
     Get all plants from database for matching with ML predictions
@@ -1476,8 +1481,6 @@ def get_all_plants(request):
             {'error': f'Failed to fetch plants: {str(e)}'},
             status=status.HTTP_500_INTERNAL_SERVER_ERROR
         )
-
-
 @api_view(['POST']) 
 def scan_plant(request):
     try:
@@ -1491,32 +1494,64 @@ def scan_plant(request):
                 status=status.HTTP_400_BAD_REQUEST
             )
         
-        # Perform ML prediction
-        user_id = request.user.id if request.user.is_authenticated else None
-        logger.info(f"🔍 Processing plant scan for user {user_id}")
+        # ✅ GET USER EMAIL - Try multiple sources
+        user_email = None
+        
+        # First, try from authenticated user
+        if request.user.is_authenticated and hasattr(request.user, 'email'):
+            user_email = request.user.email
+        
+        # Fallback: check if email was sent in request body
+        if not user_email:
+            user_email = request.data.get('user_email')
+        
+        logger.info(f"🔍 Processing plant scan for user {user_email}")
+        logger.info(f"🔍 User authenticated: {request.user.is_authenticated}")
+        logger.info(f"🔍 Request data keys: {request.data.keys()}")
+        
         prediction = plant_identifier.predict_from_base64(image_base64)
         
-        # Save scan record to database (even for unknown/error)
-        scan_record = {
-            'user_id': str(user_id) if user_id else None,
-            'plant_name': prediction.get('plant_name', 'Unknown'),
-            'scientific_name': prediction.get('scientific_name', ''),
-            'confidence': prediction.get('confidence', 0),
-            'status': prediction.get('status', 'error'),
-            'scanned_at': scanned_at or datetime.now().isoformat()
-        }
-        
-        try:
-            supabase.table('scan_history').insert(scan_record).execute()
-            logger.info(f"✅ Scan record saved for user {user_id}")
-        except Exception as db_error:
-            logger.error(f"Failed to save scan record: {str(db_error)}")
-            # Continue even if saving fails
+        # Prepare image storage - either save as URL or base64
+        # For now, we'll save the base64 directly (you can upload to a storage service later)
+        # Create a data URL from the base64 for storage
+        image_url = None
+        if image_base64:
+            # If it's already a data URL, use it as is
+            if image_base64.startswith('data:'):
+                image_url = image_base64
+            else:
+                # Otherwise, create a data URL (temporary solution)
+                # In production, upload to S3/Cloudinary and get a real URL
+                image_url = f"data:image/jpeg;base64,{image_base64}"
         
         # Handle unknown/error cases early
         if prediction['status'] == 'unknown' or prediction['status'] == 'error':
+            # Save minimal scan record for unknown/error
+            scan_record = {
+                'user_email': user_email,
+                'plant_name': prediction.get('plant_name', 'Unknown'),
+                'scientific_name': None,
+                'confidence': prediction.get('confidence', 0),
+                'status': prediction.get('status', 'error'),
+                'scanned_at': scanned_at or datetime.now().isoformat(),
+                'plant_id': None,
+                'image_url': image_url  # ✅ SAVE THE SCANNED IMAGE
+            }
+            
+            scan_history_id = None  # ✅ INITIALIZE
+            try:
+                result = supabase.table('scan_history').insert(scan_record).execute()
+                scan_history_id = result.data[0]['id']  # ✅ CAPTURE THE ID
+                logger.info(f"✅ Unknown/error scan saved for user {user_email}")
+                logger.info(f"📝 Saved record: {result.data}")
+                logger.info(f"🆔 Scan ID: {scan_history_id}")
+            except Exception as db_error:
+                logger.error(f"Failed to save scan record: {str(db_error)}")
+            
             prediction['scanned_at'] = scanned_at
-            prediction['user_id'] = str(user_id) if user_id else 'Anonymous'
+            prediction['user_email'] = user_email or 'Anonymous'
+            prediction['scan_history_id'] = scan_history_id  # ✅ ADD TO RESPONSE
+            prediction['scanned_image_url'] = image_url  # ✅ RETURN IMAGE URL TO CLIENT
             return Response(prediction, status=status.HTTP_200_OK)
         
         # Fetch all plants from database with images and ailments
@@ -1565,8 +1600,8 @@ def scan_plant(request):
             plant["ailments"] = ailments_by_disease
         
         # ML folder name to scientific name mapping
-        # This maps your ML model's folder names to proper scientific names
         ML_TO_SCIENTIFIC = {
+            # EXISTING PLANTS (20)
             'pandanus_amaryllifolius': 'Pandanus amaryllifolius',
             'origanum_vulgare': 'Origanum vulgare',
             'aloe_barbadensis': 'Aloe barbadensis',
@@ -1587,22 +1622,26 @@ def scan_plant(request):
             'psidium_guajava': 'Psidium guajava',
             'senna_alata': 'Senna alata',
             'vitex_negundo': 'Vitex negundo',
+            
+            # NEW PLANTS (5)
+            'moringa_oleifera': 'Moringa oleifera',
+            'momordica_charantia': 'Momordica charantia',
+            'hibiscus_rosa_sinensis': 'Hibiscus rosa-sinensis',
+            'antidesma_bunius': 'Antidesma bunius',
+            'citrus_aurantiifolia': 'Citrus aurantiifolia',
         }
         
         # Helper function to normalize names for comparison
         def normalize_name(name):
             if not name:
                 return ""
-            # Remove underscores, hyphens, extra spaces, and lowercase
             normalized = name.lower().replace('_', ' ').replace('-', ' ')
-            # Remove multiple spaces
             while '  ' in normalized:
                 normalized = normalized.replace('  ', ' ')
             return normalized.strip()
         
         # Helper function to extract genus and species
         def get_genus_species(scientific_name):
-            """Extract first two words (genus + species) from scientific name"""
             if not scientific_name:
                 return None
             parts = scientific_name.strip().split()
@@ -1611,7 +1650,7 @@ def scan_plant(request):
             return None
         
         # Match ML prediction with database
-        ml_plant_name = prediction['plant_name']  # e.g., "origanum_vulgare" or "pandanus_amaryllifolius"
+        ml_plant_name = prediction['plant_name']
         ml_normalized = normalize_name(ml_plant_name)
         
         # Get the proper scientific name from mapping
@@ -1633,7 +1672,7 @@ def scan_plant(request):
                 logger.info(f"✅ Matched via mapped scientific_name: '{plant['plant_name']}'")
                 break
             
-            # Strategy 2: Genus + species match (e.g., "pandanus amaryllifolius")
+            # Strategy 2: Genus + species match
             if ml_scientific:
                 ml_genus_species = get_genus_species(ml_scientific)
                 db_genus_species = get_genus_species(plant.get('scientific_name', ''))
@@ -1665,10 +1704,9 @@ def scan_plant(request):
                 if matched_plant:
                     break
             
-            # Strategy 6: Partial word matching (for compound names)
+            # Strategy 6: Partial word matching
             ml_words = [w for w in ml_normalized.split() if len(w) > 3]
             if ml_words:
-                # Check if all significant words appear in either scientific or common name
                 if all(word in db_scientific for word in ml_words):
                     matched_plant = plant
                     logger.info(f"✅ Matched via partial scientific_name: '{plant['plant_name']}'")
@@ -1678,9 +1716,48 @@ def scan_plant(request):
                     logger.info(f"✅ Matched via partial plant_name: '{plant['plant_name']}'")
                     break
         
+        # ✅ BUILD SCAN RECORD WITH ALL DATA INCLUDING IMAGE
+        if matched_plant:
+            scan_record = {
+                'user_email': user_email,
+                'plant_id': matched_plant['id'],
+                'plant_name': matched_plant['plant_name'],
+                'scientific_name': matched_plant['scientific_name'],
+                'confidence': prediction['confidence'],
+                'status': prediction['status'],
+                'scanned_at': scanned_at or datetime.now().isoformat(),
+                'image_url': image_url  # ✅ SAVE THE SCANNED IMAGE
+            }
+        else:
+            # No database match
+            formatted_name = ml_plant_name.replace('_', ' ').title()
+            display_scientific = ml_scientific if ml_scientific else ml_plant_name.replace('_', ' ').capitalize()
+            
+            scan_record = {
+                'user_email': user_email,
+                'plant_id': None,
+                'plant_name': formatted_name,
+                'scientific_name': display_scientific,
+                'confidence': prediction['confidence'],
+                'status': prediction['status'],
+                'scanned_at': scanned_at or datetime.now().isoformat(),
+                'image_url': image_url  # ✅ SAVE THE SCANNED IMAGE
+            }
+        
+        scan_history_id = None  
+        try:
+            result = supabase.table('scan_history').insert(scan_record).execute()
+            scan_history_id = result.data[0]['id'] 
+            logger.info(f"✅ Scan record saved for user {user_email}")
+            logger.info(f"📝 Saved record: {result.data}")
+            logger.info(f"🆔 Scan ID: {scan_history_id}")
+            logger.info(f"🖼️ Image saved: {'Yes' if image_url else 'No'}")
+        except Exception as db_error:
+            logger.error(f"❌ Failed to save scan record: {str(db_error)}")
+            logger.error(f"📝 Attempted to save: {scan_record}")
+        
         # Build response
         if matched_plant:
-            # ✅ Use database plant name (e.g., "Lemongrass" instead of "pandanus_amaryllifolius")
             response_data = {
                 'status': prediction['status'],
                 'plant_name': matched_plant['plant_name'],
@@ -1691,12 +1768,13 @@ def scan_plant(request):
                 'plant_data': matched_plant,
                 'source': 'database',
                 'scanned_at': scanned_at,
-                'user_id': str(user_id) if user_id else 'Anonymous'
+                'user_email': user_email or 'Anonymous',
+                'scan_history_id': scan_history_id,
+                'scanned_image_url': image_url  # ✅ RETURN IMAGE URL TO CLIENT
             }
             logger.info(f"✅ Returning matched plant: '{matched_plant['plant_name']}' (was '{ml_plant_name}')")
         else:
-            # No match in database - use mapped scientific name or formatted ML prediction
-            logger.warning(f"⚠️ No database match for '{ml_plant_name}'")
+            logger.warning(f"No database match for '{ml_plant_name}'")
             formatted_name = ml_plant_name.replace('_', ' ').title()
             display_scientific = ml_scientific if ml_scientific else ml_plant_name.replace('_', ' ').capitalize()
             
@@ -1711,7 +1789,9 @@ def scan_plant(request):
                 'source': 'ml_only',
                 'message': 'Plant identified but not found in database',
                 'scanned_at': scanned_at,
-                'user_id': str(user_id) if user_id else 'Anonymous'
+                'user_email': user_email or 'Anonymous',
+                'scan_history_id': scan_history_id,
+                'scanned_image_url': image_url  # ✅ RETURN IMAGE URL TO CLIENT
             }
         
         # Process top predictions with database matching
@@ -1732,12 +1812,10 @@ def scan_plant(request):
                     db_plant_name = normalize_name(plant['plant_name'])
                     db_scientific = normalize_name(plant.get('scientific_name', ''))
                     
-                    # Check mapped scientific name first
                     if pred_scientific and db_scientific == pred_scientific_normalized:
                         pred_match = plant
                         break
                     
-                    # Check genus + species
                     if pred_scientific:
                         pred_genus_species = get_genus_species(pred_scientific)
                         db_genus_species = get_genus_species(plant.get('scientific_name', ''))
@@ -1750,7 +1828,6 @@ def scan_plant(request):
                         pred_match = plant
                         break
                     
-                    # Check common names
                     if plant.get('common_names'):
                         for common_name in plant['common_names']:
                             if normalize_name(common_name) == pred_normalized:
@@ -1768,7 +1845,6 @@ def scan_plant(request):
                         'plant_data': pred_match
                     })
                 else:
-                    # No database match - use formatted ML name
                     formatted_name = pred_name.replace('_', ' ').title()
                     display_scientific = pred_scientific if pred_scientific else pred_name.replace('_', ' ').capitalize()
                     enriched_predictions.append({
@@ -1781,20 +1857,11 @@ def scan_plant(request):
             
             response_data['top_predictions'] = enriched_predictions
         
-        # Update scan_history with matched plant info
-        try:
-            supabase.table('scan_history').update({
-                'plant_name': response_data['plant_name'],
-                'scientific_name': response_data['scientific_name']
-            }).eq('user_id', str(user_id)).eq('scanned_at', scanned_at).execute()
-        except Exception as update_error:
-            logger.error(f"Failed to update scan record: {str(update_error)}")
-        
         logger.info(f"✅ Scan complete: {response_data['plant_name']} ({response_data['confidence']:.2f}%)")
         return Response(response_data, status=status.HTTP_200_OK)
         
     except Exception as e:
-        logger.error(f"Error in scan_plant: {str(e)}", exc_info=True)
+        logger.error(f"❌ Error in scan_plant: {str(e)}", exc_info=True)
         return Response(
             {'error': f'Failed to process image: {str(e)}'},
             status=status.HTTP_500_INTERNAL_SERVER_ERROR
@@ -1809,6 +1876,7 @@ def scan_plant_with_file(request):
     """
     try:
         image_file = request.FILES.get('image')
+        scanned_at = request.data.get('scanned_at')
         
         if not image_file:
             return Response(
@@ -1816,34 +1884,190 @@ def scan_plant_with_file(request):
                 status=status.HTTP_400_BAD_REQUEST
             )
         
+        # ✅ GET USER EMAIL - Try multiple sources
+        user_email = None
+        
+        # First, try from authenticated user
+        if request.user.is_authenticated and hasattr(request.user, 'email'):
+            user_email = request.user.email
+        
+        # Fallback: check if email was sent in request body
+        if not user_email:
+            user_email = request.data.get('user_email')
+        
+        logger.info(f"🔍 Processing plant scan for user {user_email}")
+        logger.info(f"🔍 User authenticated: {request.user.is_authenticated}")
+        logger.info(f"🔍 Request data keys: {request.data.keys()}")
+        
         # Perform prediction
-        user_id = request.user.id if request.user.is_authenticated else None
         prediction = plant_identifier.predict_from_file(image_file)
         
-        # Save scan record
+        # Convert file to base64 for storage
+        image_url = None
+        try:
+            # Read file content and convert to base64
+            image_file.seek(0)
+            file_content = image_file.read()
+            base64_encoded = base64.b64encode(file_content).decode('utf-8')
+            image_url = f"data:{image_file.content_type};base64,{base64_encoded}"
+            logger.info(f"📸 Converted file to base64 for storage")
+        except Exception as img_error:
+            logger.warning(f"⚠️ Could not convert image to base64: {img_error}")
+        
+        # Save scan record WITH IMAGE
         scan_record = {
-            'user_id': str(user_id) if user_id else None,
+            'user_email': user_email,
             'plant_name': prediction.get('plant_name', 'Unknown'),
             'scientific_name': prediction.get('scientific_name', ''),
             'confidence': prediction.get('confidence', 0),
             'status': prediction.get('status', 'error'),
-            'scanned_at': datetime.now().isoformat()
+            'scanned_at': scanned_at or datetime.now().isoformat(),
+            'image_url': image_url 
         }
         
+        scan_history_id = None  
         try:
-            supabase.table('scan_history').insert(scan_record).execute()
+            result = supabase.table('scan_history').insert(scan_record).execute()
+            scan_history_id = result.data[0]['id']  
+            logger.info(f"Scan record saved for user {user_email}")
+            logger.info(f"Saved record: {result.data}")
+            logger.info(f"Scan ID: {scan_history_id}")
+            logger.info(f"Image saved: {'Yes' if image_url else 'No'}")
         except Exception as db_error:
             logger.error(f"Failed to save scan record: {str(db_error)}")
+            logger.error(f"Attempted to save: {scan_record}")
         
         # Add metadata
-        prediction['user_id'] = str(user_id) if user_id else 'Anonymous'
+        prediction['user_email'] = user_email or 'Anonymous'
+        prediction['scan_history_id'] = scan_history_id  
+        prediction['scanned_image_url'] = image_url  
         
         return Response(prediction, status=status.HTTP_200_OK)
         
     except Exception as e:
-        logger.error(f"Error in scan_plant_with_file: {str(e)}")
+        logger.error(f"❌ Error in scan_plant_with_file: {str(e)}")
         return Response(
             {'error': f'Failed to process image: {str(e)}'},
+            status=status.HTTP_500_INTERNAL_SERVER_ERROR
+        )
+
+@api_view(['GET'])
+def get_trending_plants(request):
+    """
+    Get trending plants based on scan history from the past week
+    Returns top 5 most scanned plants with their details
+    """
+    try:
+        # Calculate date 7 days ago
+        seven_days_ago = (datetime.now() - timedelta(days=7)).isoformat()
+        
+        logger.info(f"📊 Fetching trending plants since {seven_days_ago}")
+        
+        # Get scan history from the past week, excluding unknown/error statuses
+        scan_history_response = (
+            supabase.table('scan_history')
+            .select('plant_id, plant_name, scientific_name, created_at')
+            .gte('created_at', seven_days_ago)
+            .neq('status', 'unknown')
+            .neq('status', 'error')
+            .not_.is_('plant_id', 'null')  # Only include scans with valid plant_id
+            .execute()
+        )
+        
+        scans = scan_history_response.data or []
+        logger.info(f"📊 Found {len(scans)} scans in the past week")
+        
+        if not scans:
+            return Response({
+                'trending_plants': [],
+                'message': 'No scan data available for the past week'
+            }, status=status.HTTP_200_OK)
+        
+        # Count occurrences of each plant_id
+        plant_counts = {}
+        plant_info = {}  # Store plant_name and scientific_name
+        
+        for scan in scans:
+            plant_id = scan.get('plant_id')
+            if plant_id:
+                plant_counts[plant_id] = plant_counts.get(plant_id, 0) + 1
+                # Store the latest name info for this plant
+                if plant_id not in plant_info:
+                    plant_info[plant_id] = {
+                        'plant_name': scan.get('plant_name'),
+                        'scientific_name': scan.get('scientific_name')
+                    }
+        
+        # Sort by count and get top 5
+        top_plant_ids = sorted(plant_counts.items(), key=lambda x: x[1], reverse=True)[:5]
+        
+        logger.info(f"📊 Top {len(top_plant_ids)} trending plants: {top_plant_ids}")
+        
+        # Fetch full details for top plants
+        trending_plants = []
+        
+        for plant_id, scan_count in top_plant_ids:
+            try:
+                # Get plant details from plants table
+                plant_response = (
+                    supabase.table('plants')
+                    .select('id, plant_name, scientific_name, common_names, origin')
+                    .eq('id', plant_id)
+                    .execute()
+                )
+                
+                if plant_response.data and len(plant_response.data) > 0:
+                    plant = plant_response.data[0]
+                    
+                    # Get the first image for this plant
+                    image_response = (
+                        supabase.table('plant_images')
+                        .select('image_url')
+                        .eq('plant_id', plant_id)
+                        .limit(1)
+                        .execute()
+                    )
+                    
+                    image_url = None
+                    if image_response.data and len(image_response.data) > 0:
+                        image_url = image_response.data[0].get('image_url')
+                    
+                    trending_plants.append({
+                        'id': plant['id'],
+                        'plant_name': plant['plant_name'],
+                        'scientific_name': plant['scientific_name'],
+                        'common_names': plant.get('common_names', []),
+                        'origin': plant.get('origin'),
+                        'image_url': image_url,
+                        'scan_count': scan_count  # How many times it was scanned
+                    })
+                else:
+                    # Fallback: use info from scan_history if plant not in plants table
+                    logger.warning(f"⚠️ Plant {plant_id} not found in plants table, using scan_history data")
+                    trending_plants.append({
+                        'id': plant_id,
+                        'plant_name': plant_info[plant_id]['plant_name'],
+                        'scientific_name': plant_info[plant_id]['scientific_name'],
+                        'image_url': None,
+                        'scan_count': scan_count
+                    })
+                    
+            except Exception as e:
+                logger.error(f"❌ Error fetching plant {plant_id}: {str(e)}")
+                continue
+        
+        logger.info(f"✅ Returning {len(trending_plants)} trending plants")
+        
+        return Response({
+            'trending_plants': trending_plants,
+            'period': 'past_week',
+            'total_scans': len(scans)
+        }, status=status.HTTP_200_OK)
+        
+    except Exception as e:
+        logger.error(f"❌ Error in get_trending_plants: {str(e)}", exc_info=True)
+        return Response(
+            {'error': f'Failed to fetch trending plants: {str(e)}'},
             status=status.HTTP_500_INTERNAL_SERVER_ERROR
         )
 
@@ -2134,7 +2358,7 @@ def get_system_logs(request):
 
 
 @api_view(["GET"])
-@permission_classes([AllowAny])  # Change to admin-only in production
+@permission_classes([AllowAny]) 
 def get_notifications(request):
     """
     Fetch recent notifications for admin dashboard
@@ -2283,4 +2507,1124 @@ def create_notification(notification_type, title, message, user_id=None, related
     except Exception as e:
         print(f"❌ Failed to create notification: {e}")
 
+# ============================================================================
+# ✅ ADD PLANT TO JOURNAL (No Authentication)
+# ============================================================================
+@csrf_exempt
+@api_view(['POST'])
+def add_to_journal(request):
+    try:
+        user_email = request.data.get('user_email')
+        plant_id = request.data.get('plant_id')
+        
+        if not user_email:
+            return Response(
+                {'error': 'user_email is required'}, 
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        
+        if not plant_id:
+            return Response(
+                {'error': 'plant_id is required'}, 
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        
+        # Get user UUID from email
+        user_resp = (
+            supabase.table("users")
+            .select("id, user_name")
+            .eq("user_email", user_email)
+            .single()
+            .execute()
+        )
+        
+        if not user_resp.data:
+            return Response(
+                {'error': 'User not found'}, 
+                status=status.HTTP_404_NOT_FOUND
+            )
+        
+        user_uuid = user_resp.data['id']
+        
+        # Check if plant exists
+        plant_resp = (
+            supabase.table("plants")
+            .select("id, plant_name, scientific_name")
+            .eq("id", plant_id)
+            .single()
+            .execute()
+        )
+        
+        if not plant_resp.data:
+            return Response(
+                {'error': 'Plant not found'}, 
+                status=status.HTTP_404_NOT_FOUND
+            )
+        
+        plant_name = plant_resp.data['plant_name']
+        
+        # Check if already in journal
+        existing_resp = (
+            supabase.table("journal")
+            .select("id")
+            .eq("user_id", user_uuid)
+            .eq("plant_id", plant_id)
+            .execute()
+        )
+        
+        if existing_resp.data and len(existing_resp.data) > 0:
+            return Response(
+                {
+                    'message': 'Plant already in journal', 
+                    'already_exists': True,
+                    'journal_id': existing_resp.data[0]['id'],
+                    'plant_name': plant_name
+                },
+                status=status.HTTP_200_OK
+            )
+        
+        # Insert new journal entry
+        insert_resp = (
+            supabase.table("journal")
+            .insert({
+                "user_id": user_uuid,
+                "plant_id": plant_id,
+                "nickname": "My Plant",
+                "notes": []
+            })
+            .execute()
+        )
+        
+        if not insert_resp.data:
+            raise Exception("Failed to insert journal entry")
+        
+        journal_id = insert_resp.data[0]['id']
+        
+        return Response(
+            {
+                'message': 'Plant added to journal successfully', 
+                'journal_id': journal_id,
+                'plant_name': plant_name
+            },
+            status=status.HTTP_201_CREATED
+        )
+        
+    except Exception as e:
+        print("❌ Error adding to journal:", traceback.format_exc())
+        return Response(
+            {'error': str(e)}, 
+            status=status.HTTP_500_INTERNAL_SERVER_ERROR
+        )
 
+
+# ============================================================================
+# ✅ ADD PLANT TO JOURNAL (bookmark button)
+# ============================================================================
+@csrf_exempt
+@api_view(['POST'])
+def add_to_journal(request):
+    try:
+        user_email = request.data.get('user_email')
+        plant_id = request.data.get('plant_id')
+        
+        if not user_email:
+            return Response(
+                {'error': 'user_email is required'}, 
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        
+        if not plant_id:
+            return Response(
+                {'error': 'plant_id is required'}, 
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        
+        # Get user UUID from email
+        user_resp = (
+            supabase.table("users")
+            .select("id, user_name")
+            .eq("user_email", user_email)
+            .execute()
+        )
+        
+        if not user_resp.data or len(user_resp.data) == 0:
+            return Response(
+                {'error': 'User not found'}, 
+                status=status.HTTP_404_NOT_FOUND
+            )
+        
+        user_uuid = user_resp.data[0]['id']
+        
+        # Check if plant exists
+        plant_resp = (
+            supabase.table("plants")
+            .select("id, plant_name, scientific_name")
+            .eq("id", plant_id)
+            .execute()
+        )
+        
+        if not plant_resp.data or len(plant_resp.data) == 0:
+            return Response(
+                {'error': 'Plant not found'}, 
+                status=status.HTTP_404_NOT_FOUND
+            )
+        
+        plant_name = plant_resp.data[0]['plant_name']
+        
+        # Check if already in journal
+        existing_resp = (
+            supabase.table("plant_journal")
+            .select("id")
+            .eq("user_id", user_uuid)
+            .eq("plant_id", plant_id)
+            .execute()
+        )
+        
+        if existing_resp.data and len(existing_resp.data) > 0:
+            return Response(
+                {
+                    'message': 'Plant already in journal', 
+                    'already_exists': True,
+                    'journal_id': existing_resp.data[0]['id'],
+                    'plant_name': plant_name
+                },
+                status=status.HTTP_200_OK
+            )
+        
+        # Insert new journal entry - nickname will be NULL initially
+        insert_resp = (
+            supabase.table("plant_journal")
+            .insert({
+                "user_id": user_uuid,
+                "plant_id": plant_id,
+                "nickname": None,  # Changed from "My Plant" to None
+                "notes": []
+            })
+            .execute()
+        )
+        
+        if not insert_resp.data:
+            raise Exception("Failed to insert journal entry")
+        
+        journal_id = insert_resp.data[0]['id']
+        
+        print(f"✅ Added {plant_name} to journal")
+        
+        return Response(
+            {
+                'message': 'Plant added to journal successfully', 
+                'journal_id': journal_id,
+                'plant_name': plant_name
+            },
+            status=status.HTTP_201_CREATED
+        )
+        
+    except Exception as e:
+        print("❌ Error adding to journal:", traceback.format_exc())
+        return Response(
+            {'error': str(e)}, 
+            status=status.HTTP_500_INTERNAL_SERVER_ERROR
+        )
+
+# Add this new endpoint for image upload
+@csrf_exempt
+@api_view(['POST'])
+def upload_note_image(request):
+    try:
+        user_email = request.data.get('user_email')
+        journal_id = request.data.get('journal_id')
+        image_base64 = request.data.get('image')
+        
+        if not all([user_email, journal_id, image_base64]):
+            return Response(
+                {'error': 'Missing required fields'}, 
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        
+        # Verify user owns this journal
+        user_resp = supabase.table("users").select("id").eq("user_email", user_email).execute()
+        if not user_resp.data:
+            return Response({'error': 'User not found'}, status=status.HTTP_404_NOT_FOUND)
+        
+        user_uuid = user_resp.data[0]['id']
+        
+        # Verify journal belongs to user
+        journal_resp = supabase.table("plant_journal").select("id").eq("id", journal_id).eq("user_id", user_uuid).execute()
+        if not journal_resp.data:
+            return Response({'error': 'Journal not found'}, status=status.HTTP_404_NOT_FOUND)
+        
+        # Decode base64 image
+        import base64
+        import uuid
+        from datetime import datetime
+        
+        # Remove data URI prefix if present
+        if 'base64,' in image_base64:
+            image_base64 = image_base64.split('base64,')[1]
+        
+        image_data = base64.b64decode(image_base64)
+        
+        # Generate unique filename
+        timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+        filename = f"journal_{journal_id}_{timestamp}_{uuid.uuid4().hex[:8]}.jpg"
+        file_path = f"note_images/{user_uuid}/{filename}"
+        
+        print(f"📤 Uploading image to: {file_path}")
+        
+        # Upload to Supabase Storage
+        upload_resp = supabase.storage.from_('plant-journal-images').upload(
+            file_path,
+            image_data,
+            {'content-type': 'image/jpeg'}
+        )
+        
+        print(f"✅ Upload response: {upload_resp}")
+        
+        # Get public URL
+        public_url = supabase.storage.from_('plant-journal-images').get_public_url(file_path)
+        
+        print(f"🔗 Public URL: {public_url}")
+        
+        return Response(
+            {
+                'message': 'Image uploaded successfully',
+                'image_url': public_url
+            },
+            status=status.HTTP_201_CREATED
+        )
+        
+    except Exception as e:
+        print("❌ Error uploading image:", traceback.format_exc())
+        return Response(
+            {'error': str(e)}, 
+            status=status.HTTP_500_INTERNAL_SERVER_ERROR
+        )
+# ============================================================================
+# ✅ GET USER'S JOURNAL PLANTS (display in journal page)
+# ============================================================================
+@csrf_exempt
+@api_view(['GET'])
+def get_user_journal(request):
+    try:
+        user_email = request.GET.get('user_email')
+        
+        if not user_email:
+            return Response(
+                {'error': 'user_email is required'}, 
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        
+        print(f"📥 Fetching journal for: {user_email}")
+        
+        # Get user UUID from email
+        user_resp = (
+            supabase.table("users")
+            .select("id")
+            .eq("user_email", user_email)
+            .execute()
+        )
+        
+        if not user_resp.data or len(user_resp.data) == 0:
+            print(f"❌ User not found: {user_email}")
+            return Response(
+                {'error': 'User not found'}, 
+                status=status.HTTP_404_NOT_FOUND
+            )
+        
+        user_uuid = user_resp.data[0]['id']
+        print(f"✅ Found user: {user_uuid}")
+        
+        # Get all journal entries
+        journal_resp = (
+            supabase.table("plant_journal")
+            .select("id, plant_id, nickname, notes, created_at")
+            .eq("user_id", user_uuid)
+            .order("created_at", desc=True)
+            .execute()
+        )
+        
+        journal_entries = journal_resp.data or []
+        print(f"📋 Found {len(journal_entries)} journal entries")
+        
+        # Fetch plant details for each entry
+        plants = []
+        for entry in journal_entries:
+            plant_id = entry['plant_id']
+            
+            # Get plant details
+            plant_resp = (
+                supabase.table("plants")
+                .select("id, plant_name, scientific_name")
+                .eq("id", plant_id)
+                .execute()
+            )
+            
+            if not plant_resp.data or len(plant_resp.data) == 0:
+                print(f"⚠️ Plant not found: {plant_id}")
+                continue
+            
+            plant = plant_resp.data[0]
+            
+            # Get first plant image
+            image_resp = (
+                supabase.table("plant_images")
+                .select("image_url")
+                .eq("plant_id", plant_id)
+                .limit(1)
+                .execute()
+            )
+            
+            image_url = None
+            if image_resp.data and len(image_resp.data) > 0:
+                image_url = image_resp.data[0]['image_url']
+            
+            plants.append({
+                'journal_id': entry['id'],
+                'plant_id': plant['id'],
+                'name': plant['plant_name'],
+                'scientificName': plant.get('scientific_name'),
+                'nickname': entry.get('nickname'),  # Can be None
+                'image': image_url,
+                'notes': entry.get('notes', []),
+                'created_at': entry.get('created_at')
+            })
+        
+        print(f"✅ Fetched {len(plants)} plants from journal for user {user_email}")
+        
+        return Response(
+            {
+                'plants': plants,
+                'count': len(plants)
+            },
+            status=status.HTTP_200_OK
+        )
+        
+    except Exception as e:
+        print("❌ Error fetching journal:", traceback.format_exc())
+        return Response(
+            {'error': str(e)}, 
+            status=status.HTTP_500_INTERNAL_SERVER_ERROR
+        )
+
+
+# ============================================================================
+# ✅ GET JOURNAL ENTRY DETAILS (for PlantDetailsJournal screen)
+# ============================================================================
+@csrf_exempt
+@api_view(['GET'])
+def get_journal_details(request, journal_id):
+    try:
+        user_email = request.GET.get('user_email')
+
+        if not user_email:
+            return Response(
+                {'error': 'user_email is required'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        print(f"📥 Fetching journal details for journal_id: {journal_id}")
+
+        # 1️⃣ Get user UUID
+        user_resp = (
+            supabase.table("users")
+            .select("id")
+            .eq("user_email", user_email)
+            .single()
+            .execute()
+        )
+
+        if not user_resp.data:
+            return Response(
+                {'error': 'User not found'},
+                status=status.HTTP_404_NOT_FOUND
+            )
+
+        user_uuid = user_resp.data['id']
+        print(f"✅ User UUID: {user_uuid}")
+
+       
+        journal_resp = (
+            supabase.table("plant_journal")
+            .select("id, plant_id, nickname, notes, created_at, updated_at")
+            .eq("id", journal_id)
+            .eq("user_id", user_uuid)
+            .single()
+            .execute()
+        )
+
+        if not journal_resp.data:
+            return Response(
+                {'error': 'Journal entry not found or unauthorized'},
+                status=status.HTTP_404_NOT_FOUND
+            )
+
+        entry = journal_resp.data
+        print(f"✅ Found journal entry")
+
+        # 3️⃣ Get plant details (IMPORTANT FIX)
+        plant_resp = (
+            supabase.table("plants")
+            .select("plant_name, scientific_name")
+            .eq("id", entry["plant_id"])
+            .single()
+            .execute()
+        )
+
+        if not plant_resp.data:
+            return Response(
+                {'error': 'Plant not found'},
+                status=status.HTTP_404_NOT_FOUND
+            )
+
+        plant = plant_resp.data
+        print(f"🌱 Plant: {plant['plant_name']} ({plant['scientific_name']})")
+
+        # 4️⃣ Return full journal details INCLUDING scientific name
+        return Response(
+            {
+                'journal_id': entry['id'],
+                'plant_id': entry['plant_id'],
+                'plantName': plant['plant_name'],
+                'scientificName': plant['scientific_name'],  
+                'nickname': entry.get('nickname'),
+                'notes': entry.get('notes', []),
+                'created_at': entry.get('created_at'),
+                'updated_at': entry.get('updated_at'),
+            },
+            status=status.HTTP_200_OK
+        )
+
+    except Exception as e:
+        print("❌ Error fetching journal details:", traceback.format_exc())
+        return Response(
+            {'error': str(e)},
+            status=status.HTTP_500_INTERNAL_SERVER_ERROR
+        )
+
+
+
+# ============================================================================
+# ✅ UPDATE JOURNAL ENTRY (nickname and/or notes)
+# ============================================================================
+@csrf_exempt
+@api_view(['PATCH'])
+def update_journal(request, journal_id):
+    try:
+        user_email = request.data.get('user_email')
+        
+        if not user_email:
+            return Response(
+                {'error': 'user_email is required'}, 
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        
+        print(f"📝 Updating journal entry: {journal_id}")
+        
+        # Get user UUID
+        user_resp = (
+            supabase.table("users")
+            .select("id")
+            .eq("user_email", user_email)
+            .execute()
+        )
+        
+        if not user_resp.data or len(user_resp.data) == 0:
+            return Response(
+                {'error': 'User not found'}, 
+                status=status.HTTP_404_NOT_FOUND
+            )
+        
+        user_uuid = user_resp.data[0]['id']
+        
+        # Verify journal entry belongs to user
+        verify_resp = (
+            supabase.table("plant_journal")
+            .select("id")
+            .eq("id", journal_id)
+            .eq("user_id", user_uuid)
+            .execute()
+        )
+        
+        if not verify_resp.data or len(verify_resp.data) == 0:
+            return Response(
+                {'error': 'Journal entry not found or unauthorized'}, 
+                status=status.HTTP_404_NOT_FOUND
+            )
+        
+        # Build update data
+        update_data = {
+            'updated_at': datetime.now().isoformat()
+        }
+        
+        # Update nickname if provided
+        if 'nickname' in request.data:
+            update_data['nickname'] = request.data['nickname']
+            print(f"  - Updating nickname to: {request.data['nickname']}")
+        
+        # Update notes if provided
+        if 'notes' in request.data:
+            update_data['notes'] = request.data['notes']
+            print(f"  - Updating notes (count: {len(request.data['notes'])})")
+        
+        # Perform update
+        update_resp = (
+            supabase.table("plant_journal")
+            .update(update_data)
+            .eq("id", journal_id)
+            .eq("user_id", user_uuid)
+            .execute()
+        )
+        
+        if not update_resp.data:
+            raise Exception("Failed to update journal entry")
+        
+        print("✅ Journal entry updated successfully")
+        
+        return Response(
+            {
+                'message': 'Journal entry updated successfully',
+                'journal_id': journal_id,
+                'updated_fields': list(update_data.keys())
+            },
+            status=status.HTTP_200_OK
+        )
+        
+    except Exception as e:
+        print("❌ Error updating journal:", traceback.format_exc())
+        return Response(
+            {'error': str(e)}, 
+            status=status.HTTP_500_INTERNAL_SERVER_ERROR
+        )
+# ============================================================================
+# ✅ DELETE JOURNAL ENTRY
+# ============================================================================
+@csrf_exempt
+@api_view(['DELETE'])
+def delete_journal_entry(request, journal_id):
+    try:
+        user_email = request.GET.get('user_email')
+        
+        if not user_email:
+            return Response(
+                {'error': 'user_email is required'}, 
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        
+        print(f"🗑️ Deleting journal entry: {journal_id}")
+        
+        # Get user UUID
+        user_resp = (
+            supabase.table("users")
+            .select("id")
+            .eq("user_email", user_email)
+            .execute()
+        )
+        
+        if not user_resp.data or len(user_resp.data) == 0:
+            return Response(
+                {'error': 'User not found'}, 
+                status=status.HTTP_404_NOT_FOUND
+            )
+        
+        user_uuid = user_resp.data[0]['id']
+        
+        # Delete journal entry (only if it belongs to this user)
+        delete_resp = (
+            supabase.table("plant_journal")
+            .delete()
+            .eq("id", journal_id)
+            .eq("user_id", user_uuid)
+            .execute()
+        )
+        
+        if not delete_resp.data or len(delete_resp.data) == 0:
+            return Response(
+                {'error': 'Journal entry not found or unauthorized'}, 
+                status=status.HTTP_404_NOT_FOUND
+            )
+        
+        print(f"✅ Deleted journal entry: {journal_id}")
+        
+        return Response(
+            {'message': 'Plant removed from journal successfully'},
+            status=status.HTTP_200_OK
+        )
+        
+    except Exception as e:
+        print("❌ Error deleting journal:", traceback.format_exc())
+        return Response(
+            {'error': str(e)}, 
+            status=status.HTTP_500_INTERNAL_SERVER_ERROR
+        )
+
+# ============================================
+# 1. SUBMIT FEEDBACK (Mobile App)
+# ============================================
+@api_view(['POST'])
+def submit_feedback(request):
+    try:
+        user_email = request.data.get('user_email')
+        plant_predicted = request.data.get('plant_predicted')
+        user_action = request.data.get('user_action')  # 'correct' or 'incorrect'
+        plant_image_url = request.data.get('plant_image_url')
+        scan_history_id = request.data.get('scan_history_id')
+        
+        actual_scanned_image = None
+        if scan_history_id:
+            try:
+                # Fetch the scanned image from scan_history
+                scan_result = supabase.table('scan_history')\
+                    .select('image_url')\
+                    .eq('id', scan_history_id)\
+                    .execute()
+                
+                if scan_result.data and scan_result.data[0].get('image_url'):
+                    actual_scanned_image = scan_result.data[0]['image_url']
+                    logger.info(f"Retrieved actual scanned image from scan_history")
+                else:
+                    logger.warning(f"No image found in scan_history for ID: {scan_history_id}")
+            except Exception as e:
+                logger.error(f"Error fetching image from scan_history: {e}")
+        
+        # Use the actual scanned image if available, otherwise use provided URL
+        final_plant_image = actual_scanned_image or plant_image_url
+        
+        # Validation
+        if not all([user_email, plant_predicted, user_action, scan_history_id]):
+            return Response(
+                {'error': 'Missing required fields'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        
+        # Set status: correct → auto-logged, incorrect → pending
+        feedback_status = 'auto-logged' if user_action == 'correct' else 'pending'
+        
+        logger.info(f"Saving feedback: {user_action} for {plant_predicted} by {user_email}")
+        logger.info(f"Using image: {'Actual scanned image' if actual_scanned_image else 'Provided URL'}")
+        
+        # Insert into database
+        result = supabase.table('feedback').insert({
+            'user_email': user_email,
+            'plant_predicted': plant_predicted,
+            'user_action': user_action,
+            'plant_image_url': final_plant_image,  # ✅ Save actual scanned image
+            'scan_history_id': scan_history_id,
+            'status': feedback_status
+        }).execute()
+        
+        logger.info(f"Feedback saved: {result.data[0]['id']}")
+        
+        return Response({
+            'message': 'Feedback submitted successfully',
+            'feedback_id': result.data[0]['id'],
+            'has_actual_image': bool(actual_scanned_image)
+        }, status=status.HTTP_201_CREATED)
+    
+    except Exception as e:
+        logger.error(f"❌ Error: {e}")
+        return Response({'error': str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+
+# ============================================
+# 2. GET FEEDBACK STATS (Admin Dashboard)
+# ============================================
+@api_view(['GET'])
+def get_feedback_stats(request):
+    """
+    Get 4 statistics for admin dashboard cards
+    """
+    try:
+        print("📊 Fetching feedback statistics...")
+        
+        result = supabase.table('feedback').select('user_action, status').execute()
+        feedbacks = result.data
+        
+        total = len(feedbacks)
+        correct = len([f for f in feedbacks if f['user_action'] == 'correct'])
+        incorrect = len([f for f in feedbacks if f['user_action'] == 'incorrect'])
+        pending = len([f for f in feedbacks if f['status'] == 'pending'])
+        accuracy = round((correct / total * 100), 1) if total > 0 else 0.0
+        
+        stats = {
+            'correct_confirmations': correct,
+            'incorrect_reports': incorrect,
+            'pending_reviews': pending,
+            'overall_accuracy': accuracy
+        }
+        
+        print(f"✅ Stats: {stats}")
+        return Response(stats, status=status.HTTP_200_OK)
+    
+    except Exception as e:
+        print(f"❌ Error: {e}")
+        return Response({'error': str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+# ============================================
+# 3. GET FEEDBACK LIST (Admin Dashboard Table) - UPDATED WITH IMAGE ENDPOINT
+# ============================================
+@api_view(['GET'])
+def get_feedback_list(request):
+    try:
+        filter_status = request.GET.get('status', 'all')
+        search_query = request.GET.get('search', '')
+        
+        print(f"🔍 Fetching feedback list - Status: {filter_status}, Search: '{search_query}'")
+        
+        # Query with join
+        query = supabase.table('feedback').select('''
+            id,
+            plant_predicted,
+            user_action,
+            plant_image_url,
+            status,
+            created_at,
+            user_email,
+            scan_history_id,
+            scan_history:scan_history_id (
+                confidence,
+                plant_id,
+                image_url
+            )
+        ''')
+        
+        # Apply filters
+        if filter_status == 'incorrect':
+            query = query.eq('user_action', 'incorrect')
+        elif filter_status == 'pending':
+            query = query.eq('status', 'pending')
+        
+        if search_query:
+            query = query.ilike('plant_predicted', f'%{search_query}%')
+        
+        result = query.order('created_at', desc=True).execute()
+        
+        formatted_data = []
+        for item in result.data:
+            # Get data from scan_history
+            confidence = None
+            plant_id = None
+            scanned_image_url = None
+            
+            if item.get('scan_history'):
+                sh = item['scan_history']
+                if isinstance(sh, list) and len(sh) > 0:
+                    confidence = sh[0].get('confidence')
+                    plant_id = sh[0].get('plant_id')
+                    scanned_image_url = sh[0].get('image_url')
+                elif isinstance(sh, dict):
+                    confidence = sh.get('confidence')
+                    plant_id = sh.get('plant_id')
+                    scanned_image_url = sh.get('image_url')
+            
+            # ✅ ALWAYS use the image endpoint for consistent image serving
+            # This ensures all images are served properly through our endpoint
+            plant_image = f"http://127.0.0.1:8000/api/feedback/{item['id']}/image/"
+            
+            # Track where the original image is stored
+            image_source = "none"
+            if scanned_image_url:
+                image_source = "scan_history"
+            elif item.get('plant_image_url'):
+                image_source = "feedback"
+            
+            # Format date
+            try:
+                date_str = datetime.fromisoformat(
+                    item['created_at'].replace('Z', '+00:00')
+                ).strftime('%b %d')
+            except:
+                date_str = 'N/A'
+            
+            formatted_data.append({
+                'id': item['id'],
+                'plant_predicted': item['plant_predicted'],
+                'user_action': item['user_action'],
+                'plant_image': plant_image,  # ✅ Now using our image endpoint
+                'status': item['status'],
+                'date': date_str,
+                'user_email': item['user_email'],
+                'confidence': confidence,
+                'plant_id': plant_id,
+                'image_source': image_source,  # For debugging
+                'original_image_url': item.get('plant_image_url') or scanned_image_url  # Keep original for reference
+            })
+        
+        print(f"✅ Found {len(formatted_data)} feedback records")
+        
+        return Response({
+            'feedback_list': formatted_data,
+            'total': len(formatted_data)
+        }, status=status.HTTP_200_OK)
+    
+    except Exception as e:
+        print(f"❌ Error: {e}")
+        return Response({'error': str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+# ============================================
+# 5. GET FEEDBACK IMAGE (Serve actual scanned image)
+# ============================================
+@api_view(['GET'])
+def get_feedback_image(request, feedback_id):
+    """
+    Serve the actual scanned plant image for feedback
+    """
+    try:
+        # Get the feedback
+        feedback_result = supabase.table('feedback')\
+            .select('plant_image_url, scan_history_id')\
+            .eq('id', feedback_id)\
+            .execute()
+        
+        if not feedback_result.data:
+            return redirect('https://via.placeholder.com/150?text=Feedback+Not+Found')
+        
+        feedback = feedback_result.data[0]
+        image_url = feedback.get('plant_image_url')
+        
+        # Try to get image from scan_history if not in feedback
+        if not image_url and feedback.get('scan_history_id'):
+            scan_result = supabase.table('scan_history')\
+                .select('image_url')\
+                .eq('id', feedback['scan_history_id'])\
+                .execute()
+            
+            if scan_result.data and scan_result.data[0].get('image_url'):
+                image_url = scan_result.data[0]['image_url']
+        
+        # If no image found
+        if not image_url:
+            return redirect('https://via.placeholder.com/150?text=No+Image')
+        
+        # Handle base64 data URLs
+        if image_url.startswith('data:image'):
+            import base64
+            from django.http import HttpResponse
+            import re
+            
+            # Extract base64 data
+            match = re.match(r'data:image/(\w+);base64,(.*)', image_url)
+            if match:
+                image_format = match.group(1)  # jpeg, png, etc
+                base64_data = match.group(2)
+                
+                try:
+                    # Decode base64
+                    image_bytes = base64.b64decode(base64_data)
+                    
+                    # Return as image response
+                    response = HttpResponse(image_bytes, content_type=f'image/{image_format}')
+                    response['Cache-Control'] = 'public, max-age=86400'  # Cache for 1 day
+                    return response
+                except:
+                    # If base64 decoding fails
+                    pass
+        
+        # If it's a regular URL, redirect to it
+        elif image_url.startswith('http'):
+            from django.shortcuts import redirect
+            return redirect(image_url)
+        
+        # Fallback to placeholder
+        return redirect('https://via.placeholder.com/150?text=Image+Error')
+        
+    except Exception as e:
+        print(f"❌ Error serving image: {e}")
+        return redirect('https://via.placeholder.com/150?text=Server+Error')
+# ============================================
+# 4. UPDATE FEEDBACK STATUS (Admin Action)
+# ============================================
+@api_view(['PUT'])
+def update_feedback_status(request, feedback_id):
+    """
+    Admin updates feedback status (mark as resolved)
+    """
+    try:
+        action = request.data.get('action')  # 'correct' or 'incorrect'
+        
+        if not action or action not in ['correct', 'incorrect']:
+            return Response(
+                {'error': 'Invalid action. Must be "correct" or "incorrect"'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        
+        # ONLY update status - remove resolved_at, admin_action, resolved_by
+        result = supabase.table('feedback').update({
+            'status': 'resolved'
+        }).eq('id', feedback_id).execute()
+        
+        if len(result.data) == 0:
+            return Response(
+                {'error': 'Feedback not found'},
+                status=status.HTTP_404_NOT_FOUND
+            )
+        
+        return Response(
+            {'message': f'Feedback marked as {action}', 'feedback': result.data[0]},
+            status=status.HTTP_200_OK
+        )
+    
+    except Exception as e:
+        print(f"❌ Error updating feedback: {e}")
+        return Response({'error': str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+
+
+def notify_premium_users_of_terms_update(version, effective_date):
+    """
+    Create notifications for all premium users when T&C is updated
+    """
+    try:
+        # Fetch all premium users
+        response = supabase.table("users").select(
+            "id, profiles!inner(is_premium)"
+        ).eq("profiles.is_premium", True).execute()
+
+        premium_users = response.data
+        
+        if not premium_users:
+            print("No premium users found to notify")
+            return
+
+        # Create notifications for each premium user
+        notifications = []
+        for user in premium_users:
+            notifications.append({
+                "user_id": user["id"],
+                "type": "terms_update",
+                "title": "Terms & Conditions Updated",
+                "message": f"New version {version} is now active. Please review the updated terms.",
+                "is_read": False,
+                "is_premium_only": True,   # HARD RULE
+                "metadata": {
+                    "version": version,
+                    "effective_date": effective_date
+                }
+            })
+
+        # Batch insert notifications
+        if notifications:
+            supabase.table("notifications").insert(notifications).execute()
+            print(f"✅ Created {len(notifications)} notifications for premium users")
+
+    except Exception as e:
+        print(f"❌ Error notifying premium users: {str(e)}")
+        print(traceback.format_exc())
+
+@api_view(['GET'])
+def get_user_notifications(request):
+    """
+    Fetch notifications for a specific user by email
+    """
+    try:
+        user_email = request.query_params.get('user_email')
+        unread_only = request.query_params.get('unread_only', 'false').lower() == 'true'
+
+        if not user_email:
+            return Response({"error": "user_email is required"}, status=400)
+
+        # 1️⃣ Get user ID
+        user_response = (
+            supabase
+            .table("users")
+            .select("id")
+            .eq("user_email", user_email)
+            .single()
+            .execute()
+        )
+
+        if not user_response.data:
+            return Response({"error": "User not found"}, status=404)
+
+        user_id = user_response.data["id"]
+
+        # 2️⃣ Get premium status from profiles
+        profile_response = (
+            supabase
+            .table("profiles")
+            .select("is_premium")
+            .eq("user_id", user_id)
+            .single()
+            .execute()
+        )
+
+        is_premium = profile_response.data.get("is_premium", False) if profile_response.data else False
+
+        # 3️⃣ Build notifications query
+        query = (
+            supabase
+            .table("notifications")
+            .select("*")
+            .eq("user_id", user_id)
+        )
+
+        # 🚫 Hide premium-only notifications for free users
+        if not is_premium:
+          query = (
+                query
+                .eq("is_premium_only", False)
+                .neq("type", "terms_update")
+            )
+
+        if unread_only:
+            query = query.eq("is_read", False)
+
+        response = query.order("created_at", desc=True).execute()
+
+        return Response(response.data or [], status=200)
+
+    except Exception as e:
+        print(traceback.format_exc())
+        return Response({"error": str(e)}, status=500)
+
+
+@api_view(['POST'])
+def mark_notification_read(request):
+    """
+    Mark a notification as read
+    Body: { "notification_id": "uuid" }
+    """
+    try:
+        notification_id = request.data.get('notification_id')
+
+        if not notification_id:
+            return Response({"error": "notification_id is required"}, status=400)
+
+        supabase.table("notifications").update({
+            "is_read": True
+        }).eq("id", notification_id).execute()
+
+        return Response({"message": "Notification marked as read"}, status=200)
+
+    except Exception as e:
+        print(traceback.format_exc())
+        return Response({"error": str(e)}, status=500)
+
+@api_view(['POST'])
+def clear_all_notifications(request):
+    """
+    Delete all notifications for a user by email
+    Body: { "user_email": "user@example.com" }
+    """
+    try:
+        user_email = request.data.get('user_email')
+
+        if not user_email:
+            return Response({"error": "user_email is required"}, status=400)
+
+        # Get user ID from email
+        user_response = supabase.table("users").select("id").eq("user_email", user_email).execute()
+        
+        if not user_response.data or len(user_response.data) == 0:
+            return Response({"error": "User not found"}, status=404)
+        
+        user_id = user_response.data[0]["id"]
+
+        # DELETE all notifications instead of marking as read
+        result = supabase.table("notifications").delete().eq("user_id", user_id).execute()
+
+        print(f"✅ Deleted {len(result.data) if result.data else 0} notifications for user: {user_email}")
+        return Response({"message": "All notifications deleted"}, status=200)
+
+    except Exception as e:
+        print(traceback.format_exc())
+        return Response({"error": str(e)}, status=500)

@@ -23,6 +23,7 @@ import { Ionicons } from "@expo/vector-icons";
 import { NativeStackNavigationProp } from "@react-navigation/native-stack";
 import { RootStackParamList } from "../App";
 import { useAuth } from "../src/contexts/AuthContext";
+import Toast from 'react-native-toast-message';
 
 type ScanPageNavigationProp = NativeStackNavigationProp<RootStackParamList>;
 type CameraFacing = "front" | "back";
@@ -54,6 +55,9 @@ export default function ScanPage() {
   const [showNoPlantModal, setShowNoPlantModal] = useState(false);
   const [showThanksMessage, setShowThanksMessage] = useState(false);
   const [visibleResultsCount, setVisibleResultsCount] = useState(2);
+  const [currentScanId, setCurrentScanId] = useState<string | null>(null);
+  const [unreadNotificationsCount, setUnreadNotificationsCount] = useState(0); 
+
   const dragStartPos = useRef({ x: 0, y: 0, frameX: 0, frameY: 0, frameWidth: 0, frameHeight: 0 });
   const { signOut, accessToken, user } = useAuth();
 
@@ -66,7 +70,7 @@ export default function ScanPage() {
 
   useEffect(() => {
     const loadUserAvatar = async () => {
-      if (!user?.email) return;
+      if (!user || !user.email) return;
       try {
         const res = await fetch(`http://127.0.0.1:8000/api/profile/?email=${encodeURIComponent(user.email)}`);
         if (res.ok) {
@@ -81,6 +85,34 @@ export default function ScanPage() {
     };
     loadUserAvatar();
   }, [user]);
+
+  // ← ADD THIS ENTIRE useEffect BLOCK
+  useEffect(() => {
+    const fetchUnreadCount = async () => {
+      if (!user?.email) return;
+      
+      try {
+        const response = await fetch(
+          `http://127.0.0.1:8000/api/get_user_notifications/?user_email=${encodeURIComponent(user.email)}`
+        );
+        
+        if (response.ok) {
+          const data = await response.json();
+          const unreadCount = data.filter((notif: any) => !notif.is_read).length;
+          setUnreadNotificationsCount(unreadCount);
+        }
+      } catch (error) {
+        console.error("Failed to fetch notifications:", error);
+      }
+    };
+
+    fetchUnreadCount();
+    
+    // Poll every 10 seconds for new notifications
+    const interval = setInterval(fetchUnreadCount, 10000);
+    
+    return () => clearInterval(interval);
+  }, [user?.email]);
 
   const getConfidenceColor = (level: string) => level === 'high' ? '#4A7C59' : level === 'medium' ? '#D4A017' : level === 'low' ? '#FF8C00' : '#CC6600';
   const toggleFlash = () => setFlashMode((current) => current === "off" ? "on" : current === "on" ? "auto" : "off");
@@ -178,8 +210,23 @@ interface PlantPrediction {
 const processAndScanImage = async (imageUri: string) => {
   try {
     setIsScanning(true);
-    setScanComplete(false);  // ← Add this line
+    setScanComplete(false);
     setShowImageEditor(false);
+    
+    // ✅ Validate user is logged in
+    if (!user?.email) {
+      Alert.alert("Error", "You must be logged in to scan plants.");
+      setIsScanning(false);
+      return;
+    }
+    
+    if (!accessToken) {
+      Alert.alert("Error", "Session expired. Please login again.");
+      setIsScanning(false);
+      return;
+    }
+    
+    console.log("✅ User email:", user.email);
     
     let finalUri = imageUri;
     if (imageRotation !== 0) {
@@ -199,42 +246,46 @@ const processAndScanImage = async (imageUri: string) => {
       const base64data = reader.result as string;
       const base64Image = base64data.split(',')[1];
       
-      if (!accessToken) {
-        Alert.alert("Error", "Session expired. Please login again.");
-        setIsScanning(false);
-        return;
-      }
+      console.log("📤 Sending scan with email:", user.email);
       
-      // Call scan endpoint - it now returns plant data included
+      // ✅ EXPLICITLY SEND USER EMAIL IN REQUEST BODY
       const scanResponse = await fetch("http://127.0.0.1:8000/api/scan_plant/", {
         method: "POST",
         headers: { 
           Authorization: `Bearer ${accessToken}`, 
           "Content-Type": "application/json" 
         },
-        body: JSON.stringify({ imageBase64: base64Image, source: "camera" }),
+        body: JSON.stringify({ 
+          imageBase64: base64Image, 
+          source: "camera",
+          user_email: user.email  // ✅ ADD THIS LINE
+        }),
       });
       
       const scanData = await scanResponse.json();
       
-      if (!scanResponse.ok) throw new Error(scanData.error || "Scan failed");
+      console.log("📥 Response:", scanData);
       
-   if (scanData.status === "unknown") {
-  stopScanAnimation();
-  setIsScanning(false);  // ← Close the scanning modal
-  setScanComplete(false);
-  setCapturedImageUri(null);
-  setShowNoPlantModal(true);  // ← Show the "no plant" modal
-  return;
-}
+      if (!scanResponse.ok) {
+        throw new Error(scanData.error || "Scan failed");
+      }
       
-      if (scanData.status === "error") throw new Error(scanData.message || "Scan failed");
+      if (scanData.status === "unknown") {
+        stopScanAnimation();
+        setIsScanning(false);
+        setScanComplete(false);
+        setCapturedImageUri(null);
+        setShowNoPlantModal(true);
+        return;
+      }
       
-      // ✅ No need to fetch /api/plants/ separately - data is already included
+      if (scanData.status === "error") {
+        throw new Error(scanData.message || "Scan failed");
+      }
       
       // Set the main result
       setPlantResult({
-        plant_name: scanData.plant_name,  // ✅ Now shows "Sambong" not "Blumea Balsamifera"
+        plant_name: scanData.plant_name,
         confidence: scanData.confidence,
         confidence_level: scanData.confidence_level || 'medium',
         warning: scanData.warning
@@ -265,7 +316,6 @@ const processAndScanImage = async (imageUri: string) => {
       // Add remaining predictions
       if (scanData.top_predictions && scanData.top_predictions.length > 0) {
         for (const pred of scanData.top_predictions) {
-          // Skip if it's the same as the main result
           if (pred.plant_name === scanData.plant_name) continue;
           
           enrichedPredictions.push({
@@ -280,9 +330,15 @@ const processAndScanImage = async (imageUri: string) => {
         }
       }
       
-      setVisibleResultsCount(2); // Reset to show only 2 results
+setVisibleResultsCount(2);
       setTopPredictions(enrichedPredictions);
-      
+
+      // ✅ Save scan_history_id for feedback
+      if (scanData.scan_history_id) {
+        setCurrentScanId(scanData.scan_history_id);
+        console.log("✅ Scan ID saved:", scanData.scan_history_id);
+      }
+
       setTimeout(() => { 
         stopScanAnimation(); 
         setScanComplete(true); 
@@ -291,7 +347,7 @@ const processAndScanImage = async (imageUri: string) => {
     
     reader.readAsDataURL(blob);
   } catch (err: any) {
-    console.error("Scan error:", err);
+    console.error("❌ Scan error:", err);
     Alert.alert(
       "Scan Failed", 
       err.message || "Please try a clearer leaf image with better lighting."
@@ -346,7 +402,6 @@ const processAndScanImage = async (imageUri: string) => {
     }
   };
   
-
 
 // ========== PAN RESPONDERS ==========
   const panResponderMove = useRef(
@@ -560,42 +615,56 @@ const processAndScanImage = async (imageUri: string) => {
             <Ionicons name={getFlashIcon()} size={28} color="#fff" />
           </TouchableOpacity>
           
-          <View style={styles.rightTopContainer}>
-            <TouchableOpacity>
-              <Ionicons name="notifications-outline" size={26} color="#fff" />
-            </TouchableOpacity>
-            <TouchableOpacity
-              style={styles.profileCircle}
-              onPress={() => navigation.navigate("Profile")}
-            >
-              {avatarUrl ? (
-                <Image source={{ uri: avatarUrl }} style={styles.profileImage} />
-              ) : (
-                <Ionicons name="person" size={20} color="#fff" />
-              )}
-            </TouchableOpacity>
-          </View>
+       <View style={styles.rightTopContainer}>
+  {/* Notifications icon with badge */}
+ <TouchableOpacity
+    style={styles.notificationIconContainer}
+    onPress={() => {
+      navigation.navigate("Notifications");
+      setUnreadNotificationsCount(0); // Reset count when opened
+    }}
+  >
+    <Ionicons name="notifications-outline" size={26} color="#fff" />
+    {unreadNotificationsCount > 0 && (
+      <View style={styles.notificationBadge} />
+    )}
+  </TouchableOpacity>
+
+  {/* Profile icon */}
+  <TouchableOpacity
+    style={styles.profileCircle}
+    onPress={() => navigation.navigate("Profile")}
+  >
+    {avatarUrl ? (
+      <Image source={{ uri: avatarUrl }} style={styles.profileImage} />
+    ) : (
+      <Ionicons name="person" size={20} color="#fff" />
+    )}
+  </TouchableOpacity>
+</View>
+
         </View>
 
   {isScanning && (
   <Modal
     visible={isScanning}
     animationType="none"
-    transparent={false}
-    statusBarTranslucent={true}
+    transparent={true}
+    statusBarTranslucent={false}
   >
     <View style={styles.scanResultsContainer}>
       {/* Header */}
       <View style={styles.scanResultsHeader}>
-        <TouchableOpacity onPress={() => {
-          stopScanAnimation();
-          setIsScanning(false);
-          setScanComplete(false);
-          setTopPredictions([]);
-          setCapturedImageUri(null);
-        }}>
-          <Ionicons name="arrow-back" size={28} color="#46811cff" />
-        </TouchableOpacity>
+     <TouchableOpacity onPress={() => {
+  stopScanAnimation();
+  setIsScanning(false);
+  setScanComplete(false);
+  setTopPredictions([]);
+  setCapturedImageUri(null);
+  setCurrentScanId(null);  // ← ADD THIS LINE
+}}>
+  <Ionicons name="arrow-back" size={28} color="#46811cff" />
+</TouchableOpacity>
         <Text style={styles.scanResultsTitle}>Snap results</Text>
         <TouchableOpacity>
           <Ionicons name="ellipsis-vertical" size={24} color="#333" />
@@ -718,11 +787,225 @@ const processAndScanImage = async (imageUri: string) => {
                       style={styles.resultCardImageHorizontal}
                       resizeMode="cover"
                     />
-          <TouchableOpacity 
+              <TouchableOpacity 
               style={styles.bookmarkButtonHorizontal}
-              onPress={(e) => {
-                e.stopPropagation(); // Prevents navigation when clicking bookmark
-                Alert.alert("Bookmarked", `${prediction.plant_name} added to favorites!`);
+              onPress={async (e) => {
+                e.stopPropagation();
+                
+                const plant = prediction.plant_data;
+                
+                if (!plant?.id) {
+                  Toast.show({
+                    type: 'error',
+                    text1: 'Cannot add to journal',
+                    text2: 'Plant information not available',
+                    position: 'top',
+                    topOffset: 80,
+                    visibilityTime: 3500,
+                    props: {
+                      style: {
+                        backgroundColor: '#FFFFFF',
+                        borderRadius: 12,
+                        paddingVertical: 16,
+                        paddingHorizontal: 20,
+                        marginHorizontal: 20,
+                        borderLeftColor: '#E53935',
+                        borderLeftWidth: 8,
+                        shadowColor: '#000',
+                        shadowOffset: { width: 0, height: 4 },
+                        shadowOpacity: 0.3,
+                        shadowRadius: 8,
+                        elevation: 8,
+                      },
+                      text1Style: { 
+                        color: '#E53935', 
+                        fontFamily: 'Poppins-Bold', 
+                        fontSize: 16,
+                        marginBottom: 4,
+                      },
+                      text2Style: { 
+                        color: '#666', 
+                        fontFamily: 'Poppins', 
+                        fontSize: 14,
+                        lineHeight: 20,
+                      },
+                    }
+                  });
+                  return;
+                }
+
+                if (!user?.email) {
+                  Toast.show({
+                    type: 'error',
+                    text1: 'Not logged in',
+                    text2: 'Please log in to save plants',
+                    position: 'top',
+                    topOffset: 80,
+                    visibilityTime: 3500,
+                    props: {
+                      style: {
+                        backgroundColor: '#FFFFFF',
+                        borderRadius: 12,
+                        paddingVertical: 16,
+                        paddingHorizontal: 20,
+                        marginHorizontal: 20,
+                        borderLeftColor: '#E53935',
+                        borderLeftWidth: 8,
+                        shadowColor: '#000',
+                        shadowOffset: { width: 0, height: 4 },
+                        shadowOpacity: 0.3,
+                        shadowRadius: 8,
+                        elevation: 8,
+                      },
+                      text1Style: { 
+                        color: '#E53935', 
+                        fontFamily: 'Poppins-Bold', 
+                        fontSize: 16,
+                        marginBottom: 4,
+                      },
+                      text2Style: { 
+                        color: '#666', 
+                        fontFamily: 'Poppins', 
+                        fontSize: 14,
+                        lineHeight: 20,
+                      },
+                    }
+                  });
+                  return;
+                }
+
+                try {
+                   const response = await fetch('http://127.0.0.1:8000/api/add_journal/', {
+                    method: 'POST',
+                    headers: {
+                      'Content-Type': 'application/json',
+                    },
+                    body: JSON.stringify({
+                      user_email: user.email,
+                      plant_id: plant.id,
+                    }),
+                  });
+
+                  const data = await response.json();
+
+                  if (response.ok) {
+                    if (data.already_exists) {
+                      Toast.show({
+                        type: 'info',
+                        text1: 'Already in journal',
+                        text2: `${prediction.plant_name} is already saved`,
+                        position: 'top',
+                        topOffset: 80,
+                        visibilityTime: 3500,
+                        props: {
+                          style: {
+                            backgroundColor: '#aa1717ff',
+                            borderRadius: 12,
+                            paddingVertical: 16,
+                            paddingHorizontal: 20,
+                            marginHorizontal: 20,
+                            borderLeftColor: '#46811C',
+                            borderLeftWidth: 8,
+                            shadowColor: '#000',
+                            shadowOffset: { width: 0, height: 4 },
+                            shadowOpacity: 0.3,
+                            shadowRadius: 8,
+                            elevation: 8,
+                          },
+                          text1Style: { 
+                            color: '#46811C', 
+                            fontFamily: 'Poppins-Bold', 
+                            fontSize: 16,
+                            marginBottom: 4,
+                          },
+                          text2Style: { 
+                            color: '#666', 
+                            fontFamily: 'Poppins', 
+                            fontSize: 14,
+                            lineHeight: 20,
+                          },
+                        }
+                      });
+                    } else {
+                      Toast.show({
+                        type: 'success',
+                        text1: 'Added to journal!',
+                        text2: `${prediction.plant_name} saved sfsfs`,
+                        position: 'top',
+                        topOffset: 80,
+                        visibilityTime: 3500,
+                        props: {
+                          style: {
+                            backgroundColor: '#267a17ff',
+                            borderRadius: 12,
+                            paddingVertical: 16,
+                            paddingHorizontal: 20,
+                            marginHorizontal: 20,
+                            borderLeftColor: '#46811C',
+                            borderLeftWidth: 8,
+                            shadowColor: '#000',
+                            shadowOffset: { width: 0, height: 4 },
+                            shadowOpacity: 0.3,
+                            shadowRadius: 8,
+                            elevation: 8,
+                          },
+                          text1Style: { 
+                            color: '#46811C', 
+                            fontFamily: 'Poppins-Bold', 
+                            fontSize: 16,
+                            marginBottom: 4,
+                          },
+                          text2Style: { 
+                            color: '#666', 
+                            fontFamily: 'Poppins', 
+                            fontSize: 14,
+                            lineHeight: 20,
+                          },
+                        }
+                      });
+                    }
+                  } else {
+                    throw new Error(data.error || 'Failed to add to journal');
+                  }
+                } catch (error) {
+                  console.error('Error adding to journal:', error);
+                  Toast.show({
+                    type: 'error',
+                    text1: 'Failed to add',
+                    text2: 'Please try again later',
+                    position: 'top',
+                    topOffset: 80,
+                    visibilityTime: 3500,
+                    props: {
+                      style: {
+                        backgroundColor: '#a05151ff',
+                        borderRadius: 12,
+                        paddingVertical: 16,
+                        paddingHorizontal: 20,
+                        marginHorizontal: 20,
+                        borderLeftColor: '#E53935',
+                        borderLeftWidth: 8,
+                        shadowColor: '#000',
+                        shadowOffset: { width: 0, height: 4 },
+                        shadowOpacity: 0.3,
+                        shadowRadius: 8,
+                        elevation: 8,
+                      },
+                      text1Style: { 
+                        color: '#E53935', 
+                        fontFamily: 'Poppins-Bold', 
+                        fontSize: 16,
+                        marginBottom: 4,
+                      },
+                      text2Style: { 
+                        color: '#666', 
+                        fontFamily: 'Poppins', 
+                        fontSize: 14,
+                        lineHeight: 20,
+                      },
+                    }
+                  });
+                }
               }}
             >
               <Ionicons name="bookmark-outline" size={22} color="#fff" /> 
@@ -782,43 +1065,147 @@ const processAndScanImage = async (imageUri: string) => {
             <View style={styles.feedbackSection}>
               <Text style={styles.feedbackText}> Found your plant?</Text>
               <View style={styles.feedbackButtons}>
-                <TouchableOpacity 
-                  style={styles.feedbackButton}
-                  onPress={() => {
-                    Alert.alert("Thank you!", "Your feedback helps improve our plant identification.");
-                    setIsScanning(false);
-                    setScanComplete(false);
-                    setTopPredictions([]);
-                  }}
-                >
-                  <Ionicons name="heart-outline" size={24} color="#3a3f3cff" />
-                </TouchableOpacity>
-                <TouchableOpacity 
-                  style={styles.feedbackButton}
-                  onPress={() => {
-                    Alert.alert("We'll try better", "Please try taking another photo with better lighting.");
-                  }}
-                >
-                  <Ionicons name="sad-outline" size={24} color="#3a3f3cff" />
-                </TouchableOpacity>
+              <TouchableOpacity 
+  style={styles.feedbackButton}
+  onPress={async () => {
+    // Check if we have scan ID
+    if (!currentScanId) {
+      Alert.alert("Error", "No scan ID available");
+      return;
+    }
+    
+    if (!user?.email) {
+      Alert.alert("Error", "User not logged in");
+      return;
+    }
+    
+    try {
+      console.log("📤 Submitting CORRECT feedback...");
+      
+      const response = await fetch('http://127.0.0.1:8000/api/feedback/', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${accessToken}`
+        },
+        body: JSON.stringify({
+          user_email: user.email,
+          plant_predicted: plantResult?.plant_name,
+          user_action: 'correct',
+          plant_image_url: capturedImageUri,
+          scan_history_id: currentScanId
+        })
+      });
+
+      const data = await response.json();
+      
+      if (response.ok) {
+        console.log("✅ Feedback submitted:", data);
+        Alert.alert("Thank you!", "Your feedback helps improve our plant identification.");
+        
+        // Reset everything
+        setIsScanning(false);
+        setScanComplete(false);
+        setTopPredictions([]);
+        setCapturedImageUri(null);
+        setCurrentScanId(null);
+      } else {
+        throw new Error(data.error || 'Failed to submit feedback');
+      }
+    } catch (error: any) {
+      console.error('❌ Feedback error:', error);
+      Alert.alert("Error", error.message || "Failed to submit feedback");
+    }
+  }}
+>
+  <Ionicons name="heart-outline" size={24} color="#3a3f3cff" />
+</TouchableOpacity>
+              <TouchableOpacity 
+  style={styles.feedbackButton}
+  onPress={async () => {
+    // Check if we have scan ID
+    if (!currentScanId) {
+      Alert.alert("Error", "No scan ID available");
+      return;
+    }
+    
+    if (!user?.email) {
+      Alert.alert("Error", "User not logged in");
+      return;
+    }
+    
+    try {
+      console.log("📤 Submitting INCORRECT feedback...");
+      
+      const response = await fetch('http://127.0.0.1:8000/api/feedback/', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${accessToken}`
+        },
+        body: JSON.stringify({
+          user_email: user.email,
+          plant_predicted: plantResult?.plant_name,
+          user_action: 'incorrect',
+          plant_image_url: capturedImageUri,
+          scan_history_id: currentScanId
+        })
+      });
+
+      const data = await response.json();
+      
+      if (response.ok) {
+        console.log("✅ Feedback submitted:", data);
+        Alert.alert("We'll try better", "Thank you for your feedback. We'll improve our identification.");
+        
+        // Reset everything
+        setIsScanning(false);
+        setScanComplete(false);
+        setTopPredictions([]);
+        setCapturedImageUri(null);
+        setCurrentScanId(null);
+      } else {
+        throw new Error(data.error || 'Failed to submit feedback');
+      }
+    } catch (error: any) {
+      console.error('❌ Feedback error:', error);
+      Alert.alert("Error", error.message || "Failed to submit feedback");
+    }
+  }}
+>
+  <Ionicons name="sad-outline" size={24} color="#3a3f3cff" />
+</TouchableOpacity>
               </View>
             </View>
 
             {/* Re-frame photo button */}
-            <TouchableOpacity 
-              style={styles.reframeButton}
-              onPress={() => {
-                setIsScanning(false);
-                setScanComplete(false);
-                setTopPredictions([]);
-                setCapturedImageUri(null);
-              }}
-            >
+          <TouchableOpacity 
+  style={styles.reframeButton}
+  onPress={() => {
+    setIsScanning(false);
+    setScanComplete(false);
+    setTopPredictions([]);
+    setCapturedImageUri(null);
+    setCurrentScanId(null);  // ← ADD THIS LINE
+  }}
+>
               <Text style={styles.reframeButtonText}>Re-frame photo and try again</Text>
             </TouchableOpacity>
        </>
         )}
-     </ScrollView>
+   </ScrollView>
+       
+       {/* Toast Container - High z-index to appear above everything */}
+       <View style={{ 
+         position: 'absolute', 
+         top: 0, 
+         left: 0, 
+         right: 0, 
+         zIndex: 9999,
+         elevation: 9999 
+       }}>
+         <Toast />
+       </View>
     </View>
   </Modal>
 )}
@@ -850,16 +1237,17 @@ const processAndScanImage = async (imageUri: string) => {
               <Text style={styles.feedbackOkayButtonText}>Okay</Text>
             </TouchableOpacity>
 
-            <TouchableOpacity 
-              style={styles.feedbackTryAgainButton}
-              onPress={() => {
-                setShowFeedbackModal(false);
-                setIsScanning(false);
-                setScanComplete(false);
-                setTopPredictions([]);
-                setCapturedImageUri(null);
-              }}
-            >
+           <TouchableOpacity 
+  style={styles.feedbackTryAgainButton}
+  onPress={() => {
+    setShowFeedbackModal(false);
+    setIsScanning(false);
+    setScanComplete(false);
+    setTopPredictions([]);
+    setCapturedImageUri(null);
+    setCurrentScanId(null);  // ← ADD THIS LINE
+  }}
+>
               <Text style={styles.feedbackTryAgainButtonText}>Try again</Text>
             </TouchableOpacity>
           </View>
@@ -883,16 +1271,17 @@ const processAndScanImage = async (imageUri: string) => {
               It seems there is no plant in this image.
             </Text>
 
-            <TouchableOpacity 
-              style={styles.noPlantTryAgainButton}
-              onPress={() => {
-                setShowNoPlantModal(false);
-                setIsScanning(false);
-                setScanComplete(false);
-                setTopPredictions([]);
-                setCapturedImageUri(null);
-              }}
-            >
+           <TouchableOpacity 
+  style={styles.noPlantTryAgainButton}
+  onPress={() => {
+    setShowNoPlantModal(false);
+    setIsScanning(false);
+    setScanComplete(false);
+    setTopPredictions([]);
+    setCapturedImageUri(null);
+    setCurrentScanId(null);  // ← ADD THIS LINE
+  }}
+>
               <Text style={styles.noPlantTryAgainButtonText}>Try again</Text>
             </TouchableOpacity>
           </View>
@@ -1236,8 +1625,7 @@ const processAndScanImage = async (imageUri: string) => {
             )}
           </View>
         </View>
-      </Modal>
-
+    </Modal>
     </View>
   );
 }
@@ -1326,414 +1714,60 @@ const styles = StyleSheet.create({
   tipsButtonSmall: { backgroundColor: "#F0F0F0", borderWidth: 1, borderColor: "#4A7C59" },
   actionButtonText: { color: "#fff", fontSize: 16, fontFamily: "Poppins-Medium" },
   cropDraggableArea: { position: "absolute", width: "100%", height: "100%", zIndex: 1 },
-
-  resultsScrollView: {
-  marginBottom: 2
-},
-resultsScrollContent: {
-  paddingRight: 16,
-  gap: 17
-},
-resultCardHorizontal: {
-  width: SCREEN_WIDTH * 0.5,
-  height: 220,
-  backgroundColor: '#fff',
-  borderRadius: 8,
-  overflow: 'hidden',
-  elevation: 2,
-  shadowColor: '#000',
-  shadowOffset: { width: 0, height: 1 },
-  shadowOpacity: 0.1,
-  shadowRadius: 3,
-  marginRight: 2,
-  marginBottom: 5,
-  position: 'relative',
-
-},
-resultImageContainerHorizontal: {
-  width: '100%',
-  height: '100%',     // ⬅️ fill entire card
-  backgroundColor: '#f0f0f0',
-  position: 'relative',
-},
-
-resultCardImageHorizontal: {
-  width: '100%',
-  height: '100%'
-},
-resultCardContentHorizontal: {
-  position: 'absolute',
-  bottom: 4,             // ⬅️ lifts it up from the bottom
-  left:4,
-  right: 4,
-  backgroundColor: '#fff',
-  padding: 8,
-  borderRadius: 5,
-  elevation: 3,                  // (optional) nice shadow
-  shadowColor: '#000',
-  shadowOpacity: 0.15,
-  shadowRadius: 4,
-},
-
-
-resultCardTitleHorizontal: {
-  fontSize: 16,
-  fontFamily: 'Poppins-SemiBold',
-  color: '#333',
-  
-},
-resultCardSubtitleHorizontal: {
-  fontSize: 13,
-  fontFamily: 'Poppins',
-  color: '#666',
-  fontStyle: 'italic'
-},
-bookmarkButtonHorizontal: {
-  position: 'absolute',
-  top: 10,
-  right: 15,
-  width: 50,
-  height: 40,
-  borderRadius: 8,
-  backgroundColor: '#46811cff',
-  justifyContent: 'center',
-  alignItems: 'center',
-  elevation: 3,
-  shadowColor: '#000',
-  shadowOffset: { width: 0, height: 2 },
-  shadowOpacity: 0.25,
-  shadowRadius: 3,
-  borderWidth: 1.5,
-  borderColor: '#fff',
-
-},
-notListedCard: {
-  width: SCREEN_WIDTH * 0.47,
-  height: 215,
-  backgroundColor: '#E8F5E9',
-  borderRadius: 12,
-  overflow: 'hidden',
-  elevation: 2,
-  shadowColor: '#000',
-  shadowOffset: { width: 0, height: 1 },
-  shadowOpacity: 0.1,
-  shadowRadius: 3,
-  justifyContent: 'center',
-  alignItems: 'center'
-},
-notListedContent: {
-  alignItems: 'center',
-  paddingHorizontal: 20
-},
-notListedTitle: {
-  fontSize: 15,
-  fontFamily: 'Poppins-SemiBold',
-  color: '#333',
-  textAlign: 'center',
-  marginTop: 10,
-  marginBottom: 20,
-  lineHeight: 24
-},
-letUsKnowButton: {
-  backgroundColor: '#46811cff',
-  paddingHorizontal: 18,
-  paddingVertical: 12,
-  borderRadius: 30,
-  elevation: 2
-},
-letUsKnowText: {
-  color: '#fff',
-  fontSize: 13,
-  fontFamily: 'Poppins-Medium',
-  gap: 5,
-},
-
-feedbackSection: {
-  backgroundColor: '#f6ebcaff',
-  borderRadius: 10,
-  padding: 12,
-  flexDirection: 'row',
-  alignItems: 'center',
-  justifyContent: 'space-between'
-},
-feedbackText: {
-  fontSize: 15,
-  fontFamily: 'Poppins-SemiBold',
-  color: '#333'
-},
-feedbackButtons: {
-  flexDirection: 'row',
-  gap: 12
-},
-feedbackButton: {
-  width: 44,
-  height: 44,
-  borderRadius: 22,
-  backgroundColor: '#fff',
-  justifyContent: 'center',
-  alignItems: 'center',
-  elevation: 1
-},
-// Scan Results Modal Styles
-// Scan Results Modal Styles
-scanResultsContainer: { flex: 1, backgroundColor: "#fff" },
-scanResultsHeader: { 
-  flexDirection: "row", 
-  justifyContent: "space-between", 
-  alignItems: "center", 
-  paddingTop: 50, 
-  paddingHorizontal: 20, 
-  paddingBottom: 12,
-  backgroundColor: "#fff"
-},
-scanResultsTitle: { 
-  fontSize: 18,
-  fontFamily: "Poppins-SemiBold", 
-  color: "#333",
-  letterSpacing: 0.2
-},
-scanImageWrapper: {
-  paddingHorizontal: 16,
-  paddingTop: 8,
-  paddingBottom: 12,
-  backgroundColor: "#fff"
-},
-scanImageContainer: { 
-  width: "100%", 
-  height: SCREEN_WIDTH * 0.9, 
-  backgroundColor: "#e8e8e8", 
-  position: "relative", 
-  overflow: "hidden",
-  borderRadius: 16,
-  elevation: 2,
-  shadowColor: "#000",
-  shadowOffset: { width: 0, height: 2 },
-  shadowOpacity: 0.1,
-  shadowRadius: 4
-},
-scanResultImage: { 
-  width: "100%", 
-  height: "100%", 
-  position: "absolute" 
-},
-gridOverlay: { 
-  position: "absolute", 
-  width: "100%", 
-  height: "100%", 
-  top: 0, 
-  left: 0 
-},
-gridDot: {
-  position: "absolute",
-  width: 2,
-  height: 2,
-  borderRadius: 1,
-  backgroundColor: "rgba(74, 124, 89, 0.35)"
-},
-scanLineGreen: { 
-  position: "absolute", 
-  width: "100%", 
-  height: 2.5, 
-  backgroundColor: "#4A7C59", 
-  shadowColor: "#4A7C59", 
-  shadowOffset: { width: 0, height: 0 }, 
-  shadowOpacity: 0.8, 
-  shadowRadius: 6, 
-  elevation: 5, 
-  left: 0, 
-  top: "50%" 
-},
-expandButton: {
-  position: "absolute",
-  top: 12,
-  right: 12,
-  width: 36,
-  height: 36,
-  borderRadius: 18,
-  backgroundColor: "rgba(255, 255, 255, 0.9)",
-  justifyContent: "center",
-  alignItems: "center",
-  elevation: 2,
-  shadowColor: "#000",
-  shadowOffset: { width: 0, height: 1 },
-  shadowOpacity: 0.2,
-  shadowRadius: 2
-},
-topResultsSection: { 
-  flex: 1, 
-  paddingHorizontal: 16, 
-  paddingTop: 2, 
-  backgroundColor: "#fff" 
-},
-topResultsTitle: { 
-  fontSize: 16.5, 
-  fontFamily: "Poppins-SemiBold", 
-  color: "#46811cff", 
-  marginBottom: 9,
-  letterSpacing: 0.3
-},
-emptyResultsGrid: { 
-  flexDirection: "row", 
-  gap: 12 
-},
-emptyResultCard: { 
-  flex: 1, 
-  height: 220, 
-  backgroundColor: "#E8F5E9", 
-  borderRadius: 16, 
-  justifyContent: "center", 
-  alignItems: "center",
-  elevation: 1,
-  shadowColor: "#000",
-  shadowOffset: { width: 0, height: 1 },
-  shadowOpacity: 0.05,
-  shadowRadius: 2
-},
-showMoreResultsButton: {
-  flexDirection: 'row',
-  alignItems: 'center',
-  justifyContent: 'flex-start',
-  paddingVertical: 5,
-  paddingLeft: 7,
-  marginBottom: 5,
-  gap: 5
-},
-showMoreResultsText: {
-  fontSize: 15,
-  fontFamily: 'Poppins-SemiBold',
-  color: '#333'
-},
-noMoreResultsContainer: {
-  paddingVertical: 10,
-  paddingLeft: 7,
-  marginBottom: 5,
-},
-noMoreResultsText: {
-  fontSize: 14,
-  fontFamily: 'Poppins',
-  color: '#666',
-  fontStyle: 'italic'
-},
-reframeButton: {
-  backgroundColor: '#e0f4e2ff',
-  paddingVertical: 16,
-  paddingHorizontal: 24,
-  borderRadius: 30,
-  alignItems: 'center',
-  marginTop: 15,
-  marginBottom: 30
-},
-reframeButtonText: {
-  fontSize: 16,
-  fontFamily: 'Poppins-SemiBold',
-  color: '#46811cff' 
-},
-
-feedbackModalOverlay: {
-  flex: 1,
-  backgroundColor: 'rgba(0, 0, 0, 0.6)',
-  justifyContent: 'center',
-  alignItems: 'center',
-  paddingHorizontal: 30
-},
-feedbackModalContent: {
-  backgroundColor: '#fff',
-  borderRadius: 20,
-  padding: 30,
-  width: '100%',
-  maxWidth: 340,
-  alignItems: 'center'
-},
-feedbackModalIcon: {
-  marginBottom: 20
-},
-feedbackModalText: {
-  fontSize: 16,
-  fontFamily: 'Poppins',
-  color: '#333',
-  textAlign: 'center',
-  lineHeight: 24,
-  marginBottom: 24
-},
-feedbackOkayButton: {
-  backgroundColor: '#E8F5E9',
-  paddingVertical: 14,
-  paddingHorizontal: 50,
-  borderRadius: 25,
-  width: '100%',
-  alignItems: 'center',
-  marginBottom: 12
-},
-feedbackOkayButtonText: {
-  fontSize: 16,
-  fontFamily: 'Poppins-SemiBold',
-  color: '#4A7C59'
-},
-feedbackTryAgainButton: {
-  backgroundColor: '#46811cff',
-  paddingVertical: 14,
-  paddingHorizontal: 50,
-  borderRadius: 25,
-  width: '100%',
-  alignItems: 'center'
-},
-feedbackTryAgainButtonText: {
-  fontSize: 16,
-  fontFamily: 'Poppins-SemiBold',
-  color: '#fff'
-},
-
-thanksText: {
-  fontSize: 16,
-  fontFamily: 'Poppins-SemiBold',
-  color: '#4A7C59',
-  marginTop: 1
-},
-
-noPlantModalOverlay: {
-  flex: 1,
-  backgroundColor: 'rgba(0, 0, 0, 0.7)',
-  justifyContent: 'center',
-  alignItems: 'center',
-  paddingHorizontal: 30
-},
-noPlantModalContent: {
-  backgroundColor: '#fff',
-  borderRadius: 20,
-  padding: 30,
-  width: '100%',
-  maxWidth: 340,
-  alignItems: 'center'
-},
-noPlantWarningIcon: {
-  marginBottom: 15
-},
-noPlantModalText: {
-  fontSize: 15,
-  fontFamily: 'Poppins-Medium',
-  color: '#333',
-  textAlign: 'center',
-  lineHeight: 26,
-  marginBottom: 30
-},
-noPlantTryAgainButton: {
-  backgroundColor: '#E53935',
-  paddingVertical: 14,
-  paddingHorizontal: 60,
-  borderRadius: 30,
-  width: '100%',
-  alignItems: 'center',
-  elevation: 2,
-  shadowColor: '#000',
-  shadowOffset: { width: 0, height: 2 },
-  shadowOpacity: 0.25,
-  shadowRadius: 3
-},
-noPlantTryAgainButtonText: {
-  fontSize: 16,
-  fontFamily: 'Poppins-Medium',
-  color: '#fff'
-},
-
-
-});
+  resultsScrollView: { marginBottom: 2 },
+  resultsScrollContent: { paddingRight: 16, gap: 17 },
+  resultCardHorizontal: { width: SCREEN_WIDTH * 0.5, height: 220, backgroundColor: "#fff", borderRadius: 8, overflow: "hidden", elevation: 2, shadowColor: "#000", shadowOffset: { width: 0, height: 1 }, shadowOpacity: 0.1, shadowRadius: 3, marginRight: 2, marginBottom: 5, position: "relative" },
+  resultImageContainerHorizontal: { width: "100%", height: "100%", backgroundColor: "#f0f0f0", position: "relative" },
+  resultCardImageHorizontal: { width: "100%", height: "100%" },
+  resultCardContentHorizontal: { position: "absolute", bottom: 4, left: 4, right: 4, backgroundColor: "#fff", padding: 8, borderRadius: 5, elevation: 3, shadowColor: "#000", shadowOpacity: 0.15, shadowRadius: 4 },
+  resultCardTitleHorizontal: { fontSize: 16, fontFamily: "Poppins-SemiBold", color: "#333" },
+  resultCardSubtitleHorizontal: { fontSize: 13, fontFamily: "Poppins", color: "#666", fontStyle: "italic" },
+  bookmarkButtonHorizontal: { position: "absolute", top: 10, right: 15, width: 50, height: 40, borderRadius: 8, backgroundColor: "#46811cff", justifyContent: "center", alignItems: "center", elevation: 3, shadowColor: "#000", shadowOffset: { width: 0, height: 2 }, shadowOpacity: 0.25, shadowRadius: 3, borderWidth: 1.5, borderColor: "#fff" },
+  notListedCard: { width: SCREEN_WIDTH * 0.47, height: 215, backgroundColor: "#E8F5E9", borderRadius: 12, overflow: "hidden", elevation: 2, shadowColor: "#000", shadowOffset: { width: 0, height: 1 }, shadowOpacity: 0.1, shadowRadius: 3, justifyContent: "center", alignItems: "center" },
+  notListedContent: { alignItems: "center", paddingHorizontal: 20 },
+  notListedTitle: { fontSize: 15, fontFamily: "Poppins-SemiBold", color: "#333", textAlign: "center", marginTop: 10, marginBottom: 20, lineHeight: 24 },
+  letUsKnowButton: { backgroundColor: "#46811cff", paddingHorizontal: 18, paddingVertical: 12, borderRadius: 30, elevation: 2 },
+  letUsKnowText: { color: "#fff", fontSize: 13, fontFamily: "Poppins-Medium", gap: 5 },
+  feedbackSection: { backgroundColor: "#f6ebcaff", borderRadius: 10, padding: 12, flexDirection: "row", alignItems: "center", justifyContent: "space-between" },
+  feedbackText: { fontSize: 15, fontFamily: "Poppins-SemiBold", color: "#333" },
+  feedbackButtons: { flexDirection: "row", gap: 12 },
+  feedbackButton: { width: 44, height: 44, borderRadius: 22, backgroundColor: "#fff", justifyContent: "center", alignItems: "center", elevation: 1 },
+  scanResultsContainer: { flex: 1, backgroundColor: "#fff" },
+  scanResultsHeader: { flexDirection: "row", justifyContent: "space-between", alignItems: "center", paddingTop: 50, paddingHorizontal: 20, paddingBottom: 12, backgroundColor: "#fff" },
+  scanResultsTitle: { fontSize: 18, fontFamily: "Poppins-SemiBold", color: "#333", letterSpacing: 0.2 },
+  scanImageWrapper: { paddingHorizontal: 16, paddingTop: 8, paddingBottom: 12, backgroundColor: "#fff" },
+  scanImageContainer: { width: "100%", height: SCREEN_WIDTH * 0.9, backgroundColor: "#e8e8e8", position: "relative", overflow: "hidden", borderRadius: 16, elevation: 2, shadowColor: "#000", shadowOffset: { width: 0, height: 2 }, shadowOpacity: 0.1, shadowRadius: 4 },
+  scanResultImage: { width: "100%", height: "100%", position: "absolute"  },
+  gridOverlay: { position: "absolute", width: "100%", height: "100%", top: 0, left: 0 },
+  gridDot: { position: "absolute", width: 2, height: 2, borderRadius: 1, backgroundColor: "rgba(74,124,89,0.35)" },
+  scanLineGreen: { position: "absolute", width: "100%", height: 2.5, backgroundColor: "#4A7C59", shadowColor: "#4A7C59", shadowOffset: { width: 0, height: 0 }, shadowOpacity: 0.8, shadowRadius: 6, elevation: 5, left: 0, top: "50%" },
+  expandButton: { position: "absolute", top: 12, right: 12, width: 36, height: 36, borderRadius: 18, backgroundColor: "rgba(255,255,255,0.9)", justifyContent: "center", alignItems: "center", elevation: 2, shadowColor: "#000", shadowOffset: { width: 0, height: 1 }, shadowOpacity: 0.2, shadowRadius: 2 },
+  topResultsSection: { flex: 1, paddingHorizontal: 16, paddingTop: 2, backgroundColor: "#fff" },
+  topResultsTitle: { fontSize: 16.5, fontFamily: "Poppins-SemiBold", color: "#46811cff", marginBottom: 9, letterSpacing: 0.3 },
+  emptyResultsGrid: { flexDirection: "row", gap: 12 },
+  emptyResultCard: { flex: 1, height: 220, backgroundColor: "#E8F5E9", borderRadius: 16, justifyContent: "center", alignItems: "center", elevation: 1, shadowColor: "#000", shadowOffset: { width: 0, height: 1 }, shadowOpacity: 0.05, shadowRadius: 2 },
+  showMoreResultsButton: { flexDirection: "row", alignItems: "center", justifyContent: "flex-start", paddingVertical: 5, paddingLeft: 7, marginBottom: 5, gap: 5 },
+  showMoreResultsText: { fontSize: 15, fontFamily: "Poppins-SemiBold", color: "#333" },
+  noMoreResultsContainer: { paddingVertical: 10, paddingLeft: 7, marginBottom: 5 },
+  noMoreResultsText: { fontSize: 14, fontFamily: "Poppins", color: "#666", fontStyle: "italic" },
+  reframeButton: { backgroundColor: "#e0f4e2ff", paddingVertical: 16, paddingHorizontal: 24, borderRadius: 30, alignItems: "center", marginTop: 15, marginBottom: 30 },
+  reframeButtonText: { fontSize: 16, fontFamily: "Poppins-SemiBold", color: "#46811cff" },
+  feedbackModalOverlay: { flex: 1, backgroundColor: "rgba(0,0,0,0.6)", justifyContent: "center", alignItems: "center", paddingHorizontal: 30 },
+  feedbackModalContent: { backgroundColor: "#fff", borderRadius: 20, padding: 30, width: "100%", maxWidth: 340, alignItems: "center" },
+  feedbackModalIcon: { marginBottom: 20 },
+  feedbackModalText: { fontSize: 16, fontFamily: "Poppins", color: "#333", textAlign: "center", lineHeight: 24, marginBottom: 24 },
+  feedbackOkayButton: { backgroundColor: "#E8F5E9", paddingVertical: 14, paddingHorizontal: 50, borderRadius: 25, width: "100%", alignItems: "center", marginBottom: 12 },
+  feedbackOkayButtonText: { fontSize: 16, fontFamily: "Poppins-SemiBold", color: "#4A7C59" },
+  feedbackTryAgainButton: { backgroundColor: "#46811cff", paddingVertical: 14, paddingHorizontal: 50, borderRadius: 25, width: "100%", alignItems: "center" },
+  feedbackTryAgainButtonText: { fontSize: 16, fontFamily: "Poppins-SemiBold", color: "#fff" },
+  thanksText: { fontSize: 16, fontFamily: "Poppins-SemiBold", color: "#4A7C59", marginTop: 1 },
+  noPlantModalOverlay: { flex: 1, backgroundColor: "rgba(0,0,0,0.7)", justifyContent: "center", alignItems: "center", paddingHorizontal: 30 },
+  noPlantModalContent: { backgroundColor: "#fff", borderRadius: 20, padding: 30, width: "100%", maxWidth: 340, alignItems: "center" },
+  noPlantWarningIcon: { marginBottom: 15 },
+  noPlantModalText: { fontSize: 15, fontFamily: "Poppins-Medium", color: "#333", textAlign: "center", lineHeight: 26, marginBottom: 30 },
+  noPlantTryAgainButton: { backgroundColor: "#E53935", paddingVertical: 14, paddingHorizontal: 60, borderRadius: 30, width: "100%", alignItems: "center", elevation: 2, shadowColor: "#000", shadowOffset: { width: 0, height: 2 }, shadowOpacity: 0.25, shadowRadius: 3 },
+  noPlantTryAgainButtonText: { fontSize: 16, fontFamily: "Poppins-Medium", color: "#fff" },
+  notificationBadgeText: { color: '#fff', fontSize: 11, fontFamily: 'Poppins-Bold', textAlign: 'center' },
+  notificationIconContainer: { position: 'relative' },
+  notificationBadge: { position: 'absolute', top: -2, right: -2, width: 12, height: 12, borderRadius: 6, backgroundColor: '#FF4B4B', borderWidth: 2, borderColor: '#000' },
+  });

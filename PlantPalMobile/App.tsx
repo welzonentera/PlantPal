@@ -16,6 +16,9 @@ import Profile from "./pages/Profile";
 import EditProfile from "./pages/EditProfile";
 import Settings from "./pages/Settings";
 import PlantDetails from "./pages/PlantDetails";
+import PlantDetailsJournal from "./pages/PlantDetailsJournal";
+import Notifications from "./pages/Notifications";
+import TermsAndConditions from "./pages/TermsAndConditions";
 
 import { AuthProvider, useAuth } from "./src/contexts/AuthContext";
 
@@ -26,8 +29,16 @@ export type RootStackParamList = {
   Profile: undefined;
   EditProfile: undefined;
   Settings: undefined;
+  Notifications: undefined;
+  TermsAndConditions: { version?: string } | undefined;
   PlantDetails: {
     plantId: string;
+  };
+  PlantDetailsJournal: {
+    plantId: string;
+    plantName: string;
+    plantImage: any;
+    scientificName?: string;
   };
 };
 
@@ -66,6 +77,16 @@ function AppNavigator() {
             }}
           />
 
+          {/* Plant Details Journal (opened from Journal My Plants) */}
+          <Stack.Screen
+            name="PlantDetailsJournal"
+            component={PlantDetailsJournal}
+            options={{
+              animation: "slide_from_right",
+              gestureEnabled: true,
+            }}
+          />
+
           {/* Profile screens */}
           <Stack.Screen
             name="Profile"
@@ -75,6 +96,27 @@ function AppNavigator() {
               gestureEnabled: true,
             }}
           />
+
+          {/* Notifications screen */}
+          <Stack.Screen
+            name="Notifications"
+            component={Notifications}
+            options={{
+              animation: "slide_from_right",
+              gestureEnabled: true,
+            }}
+          />
+
+          {/* Terms and Conditions screen */}
+          <Stack.Screen
+            name="TermsAndConditions"
+            component={TermsAndConditions}
+            options={{
+              animation: "slide_from_right",
+              gestureEnabled: true,
+            }}
+          />
+
           <Stack.Screen
             name="EditProfile"
             component={EditProfile}
@@ -83,6 +125,7 @@ function AppNavigator() {
               gestureEnabled: true,
             }}
           />
+
           <Stack.Screen
             name="Settings"
             component={Settings}

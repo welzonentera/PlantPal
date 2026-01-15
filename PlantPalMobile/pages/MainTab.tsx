@@ -1,8 +1,9 @@
 import React from "react";
 import { createBottomTabNavigator } from "@react-navigation/bottom-tabs";
-import { View, StyleSheet, Platform, SafeAreaView, Text } from "react-native";
+import { View, StyleSheet, Platform } from "react-native";
 import ScanPage from "./ScanPage";
 import SearchPage from "./SearchPage";
+import JournalPage from "./JournalPage";
 import { Ionicons } from "@expo/vector-icons";
 
 const Tab = createBottomTabNavigator();
@@ -55,7 +56,7 @@ export default function MainTab() {
 
       <Tab.Screen
         name="JournalTab"
-        component={JournalPlaceholder}
+        component={JournalPage}
         options={{
           tabBarIcon: ({ focused, color }) => (
             <Ionicons 
@@ -67,43 +68,6 @@ export default function MainTab() {
         }}
       />
     </Tab.Navigator>
-  );
-}
-
-// Placeholder for Journal until you create the full component
-function JournalPlaceholder() {
-  return (
-    <SafeAreaView 
-      style={{ 
-        flex: 1, 
-        justifyContent: "center", 
-        alignItems: "center", 
-        backgroundColor: "#f5f5f5",
-        paddingBottom: 80, // Account for tab bar
-      }}
-    >
-      <Ionicons name="journal-outline" size={60} color="#4A7C59" />
-      <Text 
-        style={{ 
-          fontSize: 24, 
-          fontFamily: "Poppins-Bold",
-          color: "#4A7C59", 
-          marginTop: 20 
-        }}
-      >
-        Journal
-      </Text>
-      <Text 
-        style={{ 
-          fontSize: 16, 
-          fontFamily: "Poppins",
-          color: "#666", 
-          marginTop: 10 
-        }}
-      >
-        Coming Soon!
-      </Text>
-    </SafeAreaView>
   );
 }
 

@@ -104,11 +104,7 @@ export default function SearchPage() {
     Skin: { bg: "#f8e8f0", text: "#88506b" },
   };
 
-  useEffect(() => {
-    loadHistory();
-    
-  }, []);
-
+  
   // Real-time search when query changes
   useEffect(() => {
     if (query.trim().length > 0) {
@@ -148,7 +144,53 @@ export default function SearchPage() {
   };
 
   
+// Add this useEffect after your existing useEffect for loadHistory
+useEffect(() => {
+  loadHistory();
+  fetchTrendingPlants(); // ✅ Fetch trending plants on mount
+}, []);
 
+// Add this function to fetch trending plants
+const fetchTrendingPlants = async () => {
+  try {
+    setTrendingLoading(true);
+    console.log("📊 Fetching trending plants...");
+    
+    const url = `${BASE_URL}/api/trending_plants/`;
+    console.log("📡 URL:", url);
+    
+    const response = await fetch(url, {
+      method: 'GET',
+      headers: {
+        'Accept': 'application/json',
+        'Content-Type': 'application/json',
+      },
+    });
+
+    console.log("📡 Response status:", response.status);
+
+    if (response.ok) {
+      const data = await response.json();
+      console.log("✅ Trending plants:", data);
+      
+      if (data && data.trending_plants && Array.isArray(data.trending_plants)) {
+        setTrendingPlants(data.trending_plants);
+      } else {
+        console.error("❌ Invalid data structure:", data);
+        setTrendingPlants([]);
+      }
+    } else {
+      const errorText = await response.text();
+      console.error("❌ Error response:", errorText);
+      setTrendingPlants([]);
+    }
+  } catch (error) {
+    console.error("❌ Network error:", error);
+    setTrendingPlants([]);
+  } finally {
+    setTrendingLoading(false);
+  }
+};
 
 
   // Search plants by name (Plants tab)
@@ -315,12 +357,14 @@ export default function SearchPage() {
       <ScrollView contentContainerStyle={styles.container} showsVerticalScrollIndicator={false}>
         {/* HEADER */}
         <View style={styles.header}>
-          <TouchableOpacity onPress={() => navigation.goBack()}>
-            <Ionicons name="arrow-back" size={24} color="#2F4F2F" />
-          </TouchableOpacity>
-          <Text style={styles.headerTitle}>Search Plants</Text>
-          <Ionicons name="leaf-outline" size={24} color="#2F4F2F" />
-        </View>
+        
+
+  <View style={styles.sideSpace} />
+  <Text style={styles.headerTitle}>Search Plants</Text>
+  <Ionicons name="leaf-outline" size={24} color="#2F4F2F" />
+</View>
+
+
 
         {/* SEARCH */}
         <View style={styles.searchBox}>
@@ -395,40 +439,44 @@ export default function SearchPage() {
           </TouchableOpacity>
         </View>
 
-        {/* TRENDING SPECIES - Coming Soon */}
-       {activeTab === "plants" && query === "" && (
+{activeTab === "plants" && query === "" && (
   <View style={styles.trendingBlock}>
     <Text style={styles.sectionTitle}>Trending species</Text>
     <Text style={styles.trendingSubtitle}>in the past week</Text>
 
     {trendingLoading ? (
-      <ActivityIndicator size="small" color="#2F4F2F" />
+      <View style={styles.loadingContainer}>
+        <ActivityIndicator size="small" color="#2F4F2F" />
+        <Text style={styles.loadingText}>Loading trending plants...</Text>
+      </View>
     ) : trendingPlants.length > 0 ? (
-     trendingPlants.map((plant) => (
-  <TouchableOpacity
-    key={plant.id}
-    style={styles.trendingItem}
-    onPress={() =>
-      navigation.navigate("PlantDetails", {
-        plantId: plant.id,
-      })
-    }
-  >
-
+      trendingPlants.map((plant, index) => (
+        <TouchableOpacity
+          key={plant.id}
+          style={styles.trendingItem}
+          onPress={() =>
+            navigation.navigate("PlantDetails", {
+              plantId: plant.id,
+            })
+          }
+        >
           {plant.image_url ? (
             <Image
               source={{ uri: plant.image_url }}
               style={styles.trendingImage}
+              resizeMode="cover"
             />
           ) : (
-            <View style={styles.trendingImage} />
+            <View style={[styles.trendingImage, styles.placeholderImage]}>
+              <Ionicons name="leaf" size={24} color="#6b8f6b" />
+            </View>
           )}
 
-          <View style={{ flex: 1 }}>
-            <Text style={styles.plantName}>
+          <View style={styles.trendingInfo}>
+            <Text style={styles.plantName} numberOfLines={1}>
               {plant.plant_name}
             </Text>
-            <Text style={styles.plantDesc}>
+            <Text style={styles.plantDesc} numberOfLines={1}>
               ({plant.scientific_name})
             </Text>
           </View>
@@ -436,14 +484,20 @@ export default function SearchPage() {
           <Ionicons
             name="trending-up-outline"
             size={22}
-            color="#2F4F2F"
+            color="#2F7D32"
           />
         </TouchableOpacity>
       ))
     ) : (
-      <Text style={styles.noDataText}>
-        No trending plants yet
-      </Text>
+      <View style={styles.noDataContainer}>
+        <Ionicons name="leaf-outline" size={40} color="#b0c4a0" />
+        <Text style={styles.noDataText}>
+          No trending plants this week
+        </Text>
+        <Text style={styles.noDataSubtext}>
+          Be the first to scan a plant!
+        </Text>
+      </View>
     )}
   </View>
 )}
@@ -577,8 +631,24 @@ export default function SearchPage() {
 const styles = StyleSheet.create({
   bg: { flex: 1 },
   container: { flexGrow: 1, alignItems: "center", paddingVertical: 40, paddingBottom: 80 },
-  header: { flexDirection: "row", alignItems: "center", justifyContent: "space-between", width: "90%", marginBottom: 20 },
-  headerTitle: { fontSize: 20, fontFamily: "Poppins-SemiBold", color: "#2F4F2F" },
+  header: {
+  flexDirection: "row",
+  alignItems: "center",
+  justifyContent: "space-between",
+  width: "90%",
+  marginBottom: 20,
+},
+
+sideSpace: {
+  width: 24, 
+},
+
+headerTitle: {
+  fontSize: 20,
+  fontFamily: "Poppins-SemiBold",
+  color: "#2F4F2F",
+  textAlign: "center",
+},
   searchBox: { flexDirection: "row", alignItems: "center", backgroundColor: "#e1e9d7", borderRadius: 20, paddingHorizontal: 15, width: "90%", height: 48, marginBottom: 15 },
   searchInput: { flex: 1, fontFamily: "Poppins", fontSize: 14, marginLeft: 8, color: "#2F4F2F" },
   tabRow: { flexDirection: "row", width: "90%", marginBottom: 20 },
@@ -614,4 +684,39 @@ const styles = StyleSheet.create({
   miniTagIcon: { width: 14, height: 14 },
   miniTagText: { fontFamily: "Poppins", fontSize: 11 },
   noDataText: { fontFamily: "Poppins", fontSize: 14, color: "#6b8f6b", textAlign: "center", marginTop: 20 },
+loadingContainer: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "center",
+    paddingVertical: 20,
+    gap: 10,
+  },
+  loadingText: {
+    fontFamily: "Poppins",
+    fontSize: 13,
+    color: "#6b8f6b",
+  },
+  trendingInfo: {
+    flex: 1,
+    marginRight: 8,
+  },
+  placeholderImage: {
+    backgroundColor: "#c5d9ba",
+    justifyContent: "center",
+    alignItems: "center",
+  },
+  noDataContainer: {
+    alignItems: "center",
+    paddingVertical: 30,
+    paddingHorizontal: 20,
+  },
+  noDataSubtext: {
+    fontFamily: "Poppins",
+    fontSize: 12,
+    color: "#b0c4a0",
+    textAlign: "center",
+    marginTop: 4,
+  },
+
+
 });

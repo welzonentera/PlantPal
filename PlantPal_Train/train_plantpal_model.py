@@ -7,7 +7,7 @@ import os
 import json
 import time
 import numpy as np
-from tqdm import tqdm  # NEW: For progress bars
+from tqdm import tqdm
 
 # ============================================================
 # CONFIGURATION
@@ -27,7 +27,7 @@ os.makedirs(OUTPUT_DIR, exist_ok=True)
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 print(f"\n{'='*60}")
-print(f"PLANTPAL MODEL TRAINING - ENHANCED GENERALIZATION")
+print(f"PLANTPAL MODEL TRAINING - 25 PLANT CLASSES")
 print(f"{'='*60}")
 print(f"Device: {device}")
 print(f"PyTorch version: {torch.__version__}")
@@ -68,12 +68,47 @@ class_names = train_dataset.classes
 num_classes = len(class_names)
 
 print(f"✓ Found {num_classes} plant classes:")
-for i, name in enumerate(class_names):
-    train_count = len([x for x in train_dataset.samples if x[1] == i])
-    val_count = len([x for x in val_dataset.samples if x[1] == i])
-    print(f"  {i}. {name}: {train_count} train, {val_count} val")
 
-print(f"\n✓ Total images: {len(train_dataset)} train, {len(val_dataset)} val")
+# Group existing and new plants
+existing_plants = [
+    "aloe_barbadensis", "averrhoa_bilimbi", "blumea_balsamifera",
+    "centella_asiatica", "coleus_scutellarioides", "corchorus_olitorius",
+    "ehretia_microphylla", "euphorbia_hirta", "jatropha_curcas",
+    "mangifera_indica", "manihot_esculenta", "mentha_cordifolia",
+    "ocimum_basilicum", "origanum_vulgare", "pandanus_amaryllifolius",
+    "peperomia_pellucida", "phyllanthus_niruri", "psidium_guajava",
+    "senna_alata", "vitex_negundo"
+]
+
+new_plants = [
+    "moringa_oleifera", "momordica_charantia", "hibiscus_rosa_sinensis",
+    "antidesma_bunius", "citrus_aurantiifolia"
+]
+
+print("\nEXISTING PLANTS (20):")
+for i, name in enumerate(class_names):
+    if name in existing_plants:
+        train_count = len([x for x in train_dataset.samples if x[1] == i])
+        val_count = len([x for x in val_dataset.samples if x[1] == i])
+        print(f"  {i:2d}. {name:30s} | Train: {train_count:4d} | Val: {val_count:3d}")
+
+print("\nNEW PLANTS (5):")
+for i, name in enumerate(class_names):
+    if name in new_plants:
+        train_count = len([x for x in train_dataset.samples if x[1] == i])
+        val_count = len([x for x in val_dataset.samples if x[1] == i])
+        marker = "[OK]" if train_count > 0 else "[WARN]"
+        print(f"  {marker} {i:2d}. {name:30s} | Train: {train_count:4d} | Val: {val_count:3d}")
+
+total_train = len(train_dataset)
+total_val = len(val_dataset)
+print(f"\n{'='*60}")
+print(f"DATASET SUMMARY:")
+print(f"  Total Classes: {num_classes} (20 existing + 5 new)")
+print(f"  Total Train Images: {total_train}")
+print(f"  Total Val Images: {total_val}")
+print(f"  Total Images: {total_train + total_val}")
+print(f"{'='*60}")
 
 # ============================================================
 # IMPROVED MODEL WITH DROPOUT
@@ -105,6 +140,7 @@ class ImprovedResNet18(nn.Module):
 model = ImprovedResNet18(num_classes).to(device)
 
 print(f"✓ ResNet18 with dropout loaded")
+print(f"✓ Output classes: {num_classes} (updated from 20 to 25)")
 print(f"✓ Last 2 blocks (layer3, layer4) unfrozen")
 print(f"✓ Dropout(0.5) added before final layer")
 
@@ -149,7 +185,6 @@ def train_epoch(model, loader, criterion, optimizer, device, epoch_num):
     correct = 0
     total = 0
     
-    # Progress bar for training batches
     pbar = tqdm(loader, desc=f"Epoch {epoch_num} [TRAIN]", 
                 bar_format='{l_bar}{bar:30}{r_bar}',
                 ncols=100)
@@ -183,7 +218,6 @@ def train_epoch(model, loader, criterion, optimizer, device, epoch_num):
             total += labels.size(0)
             correct += (predicted == labels).sum().item()
         
-        # Update progress bar with current stats
         current_loss = running_loss / total
         current_acc = 100 * correct / total
         pbar.set_postfix({
@@ -204,7 +238,6 @@ def validate(model, loader, criterion, device, epoch_num):
     correct = 0
     total = 0
     
-    # Progress bar for validation batches
     pbar = tqdm(loader, desc=f"Epoch {epoch_num} [VAL]  ", 
                 bar_format='{l_bar}{bar:30}{r_bar}',
                 ncols=100)
@@ -220,7 +253,6 @@ def validate(model, loader, criterion, device, epoch_num):
             total += labels.size(0)
             correct += (predicted == labels).sum().item()
             
-            # Update progress bar
             current_loss = running_loss / total
             current_acc = 100 * correct / total
             pbar.set_postfix({
@@ -233,9 +265,9 @@ def validate(model, loader, criterion, device, epoch_num):
     return epoch_loss, epoch_acc
 
 # ============================================================
-# TRAINING LOOP WITH BETTER VISUALIZATION
+# TRAINING LOOP
 # ============================================================
-print("\n[4/6] Starting training with enhanced generalization...")
+print("\n[4/6] Starting training with 25 plant classes...")
 print(f"{'='*60}\n")
 
 best_val_acc = 0.0
@@ -245,14 +277,10 @@ start_time = time.time()
 for epoch in range(NUM_EPOCHS):
     epoch_start = time.time()
     
-    # Train with progress bar
     train_loss, train_acc = train_epoch(model, train_loader, criterion, optimizer, device, epoch+1)
-    
-    # Validate with progress bar
     val_loss, val_acc = validate(model, val_loader, criterion, device, epoch+1)
     
     scheduler.step(val_acc)
-    
     epoch_time = time.time() - epoch_start
     
     # Save best model
@@ -263,13 +291,13 @@ for epoch in range(NUM_EPOCHS):
             'model_state_dict': model.state_dict(),
             'optimizer_state_dict': optimizer.state_dict(),
             'val_acc': val_acc,
-            'class_names': class_names
+            'class_names': class_names,
+            'num_classes': num_classes
         }, os.path.join(OUTPUT_DIR, 'best_model.pth'))
-        best_marker = " 🌟 NEW BEST!"
+        best_marker = " [NEW BEST]"
     else:
         best_marker = ""
     
-    # Summary for this epoch
     print(f"\n{'─'*60}")
     print(f"Epoch {epoch+1}/{NUM_EPOCHS} Summary ({epoch_time:.1f}s):")
     print(f"  Train Loss: {train_loss:.4f} | Train Acc: {train_acc:.2f}%")
@@ -289,7 +317,7 @@ for epoch in range(NUM_EPOCHS):
 total_time = time.time() - start_time
 
 print(f"\n{'='*60}")
-print(f"🎉 TRAINING COMPLETE!")
+print(f"TRAINING COMPLETE")
 print(f"{'='*60}")
 print(f"Total training time: {total_time/60:.1f} minutes ({total_time/3600:.2f} hours)")
 print(f"Best validation accuracy: {best_val_acc:.2f}%")
@@ -304,6 +332,7 @@ print("[5/6] Saving model and metadata...")
 torch.save({
     'model_state_dict': model.state_dict(),
     'class_names': class_names,
+    'num_classes': num_classes,
     'best_val_acc': best_val_acc
 }, os.path.join(OUTPUT_DIR, 'final_model.pth'))
 
@@ -317,6 +346,7 @@ model_info = {
     'model_architecture': 'ResNet18 (Enhanced)',
     'num_classes': num_classes,
     'class_names': class_names,
+    'new_plants_added': new_plants,
     'image_size': IMG_SIZE,
     'best_val_accuracy': best_val_acc,
     'total_train_images': len(train_dataset),
@@ -346,13 +376,19 @@ print(f"  ├─ training_history.json")
 print(f"  └─ model_info.json")
 
 # ============================================================
-# FINAL REPORT WITH TRAINING CURVE
+# FINAL REPORT
 # ============================================================
 print("\n[6/6] Final Report")
 print(f"{'='*60}")
 print(f"Model: Enhanced ResNet18")
-print(f"Classes: {num_classes}")
+print(f"Classes: {num_classes} (20 existing + 5 new)")
 print(f"Best validation accuracy: {best_val_acc:.2f}%")
+print(f"\nNEW PLANTS ADDED:")
+print(f"  1. moringa_oleifera (Malunggay)")
+print(f"  2. momordica_charantia (Ampalaya)")
+print(f"  3. hibiscus_rosa_sinensis (Gumamela)")
+print(f"  4. antidesma_bunius (Bignay)")
+print(f"  5. citrus_aurantiifolia (Calamansi)")
 print(f"\nEnhancements applied:")
 print(f"  ✓ Aggressive data augmentation")
 print(f"  ✓ MixUp augmentation")
@@ -361,19 +397,17 @@ print(f"  ✓ Dropout regularization")
 print(f"  ✓ Fine-tuned last 2 blocks")
 print(f"\nTraining Progress:")
 
-# Show training curve (last 5 epochs)
 if len(training_history) >= 5:
     print(f"\n  Last 5 Epochs:")
     for h in training_history[-5:]:
-        marker = "🌟" if h['val_acc'] == best_val_acc else "  "
-        print(f"  {marker} Epoch {h['epoch']:2d}: Train {h['train_acc']:5.2f}% → Val {h['val_acc']:5.2f}%")
+        marker = "[BEST]" if h['val_acc'] == best_val_acc else "      "
+        print(f"  {marker} Epoch {h['epoch']:2d}: Train {h['train_acc']:5.2f}% -> Val {h['val_acc']:5.2f}%")
 
 print(f"\n{'='*60}")
-print("\n✅ MODEL READY! Should generalize much better to whole plants!")
+print("\nMODEL READY WITH 25 PLANT CLASSES")
 print("\nNext steps:")
-print("  1. Test the model with real plant images")
-print("  2. Try scanning whole plants (not just leaves)")
-print("  3. Integrate with your Django backend")
-print("  4. Deploy to React Native app")
+print("  1. Test the model with all 25 plant species")
+print("  2. Verify new plants are recognized correctly")
+print("  3. Update Django backend with new class_names.json")
+print("  4. Deploy updated model to production")
 print(f"\n{'='*60}\n")
-

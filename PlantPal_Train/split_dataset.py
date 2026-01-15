@@ -15,7 +15,13 @@ ALREADY_SPLIT = [
     "origanum_vulgare",
     "phyllanthus_niruri",
     "senna_alata",
-    "vitex_negundo"
+    "vitex_negundo",
+    # Add the 5 new plants here after they're split for the first time
+    # "moringa_oleifera",
+    # "momordica_charantia",
+    # "hibiscus_rosa_sinensis",
+    # "antidesma_bunius",
+    # "citrus_aurantiifolia"
 ]
 
 # 80% train, 20% validation
@@ -35,6 +41,7 @@ print(f"NEW plants to split: {len(new_plants)} plants\n")
 
 if not new_plants:
     print("⚠ No new plants to split!")
+    print("All plants are already in the train/val folders.")
     exit()
 
 print("NEW PLANTS TO BE SPLIT:")
@@ -94,3 +101,11 @@ print("="*50)
 print(f"\nTotal classes in dataset: {len(ALREADY_SPLIT) + len(new_plants)}")
 print(f"Train folder: {TRAIN}")
 print(f"Val folder: {VAL}")
+
+print("\n" + "="*50)
+print("NEXT STEPS:")
+print("="*50)
+print("1. After verifying the split is correct, uncomment the 5 new plant names")
+print("   in the ALREADY_SPLIT list to prevent re-splitting them in the future.")
+print("2. You can now train your model with the updated dataset!")
+print("3. Total plant classes: 12")
